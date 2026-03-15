@@ -5,7 +5,7 @@ VisualStudioVersion = 17.14.36202.13
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "whenthe's app installer", "whenthe's app installer.vcxproj", "{622A90E2-8D00-47F4-975F-D62F7D62932D}"
 EndProject
-Project("{840C416C-B8F3-42BC-B0DD-F6BB14C9F8CB}") = "wai-setup_advinst", "wai-setup_advinst\wai-setup_advinst.aiproj", "{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}"
+Project("{54435603-DBB4-11D2-8724-00A0C9A8B90C}") = "wai-setup", "..\Install WAI\Install WAI.vdproj", "{25F4B819-2AF5-593E-F42B-D570E564814A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -29,18 +29,18 @@ Global
 		{622A90E2-8D00-47F4-975F-D62F7D62932D}.Release|x64.Build.0 = Release|x64
 		{622A90E2-8D00-47F4-975F-D62F7D62932D}.Release|x86.ActiveCfg = Release|Win32
 		{622A90E2-8D00-47F4-975F-D62F7D62932D}.Release|x86.Build.0 = Release|Win32
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Debug|x64.ActiveCfg = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Debug|x64.Build.0 = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Debug|x86.ActiveCfg = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Debug|x86.Build.0 = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.DefaultBuild|x64.ActiveCfg = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.DefaultBuild|x64.Build.0 = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.DefaultBuild|x86.ActiveCfg = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.DefaultBuild|x86.Build.0 = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Release|x64.ActiveCfg = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Release|x64.Build.0 = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Release|x86.ActiveCfg = DefaultBuild
-		{D8D0817B-997E-4179-8E4B-6300F2A1B9A6}.Release|x86.Build.0 = DefaultBuild
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Debug|x64.ActiveCfg = Debug
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Debug|x64.Build.0 = Debug
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Debug|x86.ActiveCfg = Debug
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Debug|x86.Build.0 = Debug
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.DefaultBuild|x64.ActiveCfg = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.DefaultBuild|x64.Build.0 = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.DefaultBuild|x86.ActiveCfg = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.DefaultBuild|x86.Build.0 = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Release|x64.ActiveCfg = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Release|x64.Build.0 = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Release|x86.ActiveCfg = Release
+		{25F4B819-2AF5-593E-F42B-D570E564814A}.Release|x86.Build.0 = Release
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -150,6 +150,9 @@
     <Image Include="..\..\..\..\..\..\visualOS HoverNet.ico" />
     <Image Include="..\..\..\..\..\..\WAI Setup Splash.bmp" />
     <Image Include="..\..\..\..\..\..\whenthe%27s app installer.ico" />
+    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\visualOS 1.ico" />
+    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\WAI-small.ico" />
+    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\WAI.ico" />
     <Image Include="AIS.ico" />
     <Image Include="bitmap2.bmp" />
     <Image Include="Bugfinders.ico" />
@@ -162,6 +165,7 @@
     <Image Include="icon2.ico" />
     <Image Include="icon3.ico" />
     <Image Include="small.ico" />
+    <Image Include="visualOS 1.ico" />
     <Image Include="visualOS 100x100 1st.ico" />
     <Image Include="visualOS HoverNet Pre-Release.ico" />
     <Image Include="visualOS HoverNet PY Variant.ico" />
@@ -170,6 +174,8 @@
     <Image Include="visualOS_icon2.ico" />
     <Image Include="visualOS_icon_white1.ico" />
     <Image Include="visualOS_icon_white2.ico" />
+    <Image Include="WAI-small.ico" />
+    <Image Include="WAI.ico" />
     <Image Include="WB-dev.ico" />
     <Image Include="WB.ico" />
     <Image Include="whenthe%27s app installer.ico" />

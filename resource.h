@@ -16,21 +16,21 @@
 #define IDI_CENTEROSV4_ICON             132
 #define IDI_ICON1                       134
 #define IDI_ICON2                       144
-#define VISUALOS_ICON1                  145
-#define VISUALOS_ICON2                  146
-#define IDI_SMALL                       151
-#define IDI_WHENTHESAPPINSTALLER        152
 #define HNDEV_ICON                      153
 #define HNPY_ICON                       154
 #define HN_ICON                         155
 #define IDB_BITMAP1                     157
+#define VISUALOS_ICON                   161
+#define IDI_ICON3                       162
+#define IDI_WHENTHESAPPINSTALLER        162
+#define IDI_SMALL                       163
 
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        161
+#define _APS_NEXT_RESOURCE_VALUE        164
 #define _APS_NEXT_COMMAND_VALUE         32771
 #define _APS_NEXT_CONTROL_VALUE         1000
 #define _APS_NEXT_SYMED_VALUE           110
