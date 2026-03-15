@@ -1,0 +1,136 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>ico;png</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="framework.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="targetver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Resource.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="whenthe%27s app installer.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Header.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="whenthe%27s app installer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="whenthe%27s app installer.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="small.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="whenthe%27s app installer.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="AIS.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="Bugfinders.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="WB.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="WB-dev.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="icon1.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="CenterOSV4iso.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="icon2.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\..\HN_ICON1.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="HNDEV_ICON2.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="HN_ICON1.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="HNDEV_ICON1.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="HN_ICON2.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS_icon1.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS_icon2.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS_icon_white1.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS_icon_white2.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="icon3.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\small.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\whenthe%27s app installer.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\visualOS HoverNet Pre-Release.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\visualOS HoverNet PY Variant.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\visualOS HoverNet.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS HoverNet Pre-Release.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS HoverNet PY Variant.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS HoverNet.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\visualOS 100x100 1st.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="visualOS 100x100 1st.ico">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\..\..\..\appinst-setup.bmp" />
+    <Image Include="bitmap2.bmp" />
+    <Image Include="..\..\..\..\..\..\WAI Setup Splash.bmp" />
+  </ItemGroup>
+</Project>
