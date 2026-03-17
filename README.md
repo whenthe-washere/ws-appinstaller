@@ -1,6 +1,6 @@
 # ws-appinstaller
 
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-darkgreen.svg)
 ![Version](https://img.shields.io/github/v/release/whenthe-washere/ws-appinstaller)
 ![Repo Size](https://img.shields.io/github/repo-size/whenthe-washere/ws-appinstaller)
 
