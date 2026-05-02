@@ -129,16 +129,7 @@
     <Image Include="visualOS 100x100 1st.ico">
       <Filter>Resource Files</Filter>
     </Image>
-    <Image Include="..\..\..\..\..\..\appinst-setup.bmp" />
-    <Image Include="bitmap2.bmp" />
-    <Image Include="..\..\..\..\..\..\WAI Setup Splash.bmp" />
     <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\visualOS 1.ico">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\WAI.ico">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\WAI-small.ico">
       <Filter>Resource Files</Filter>
     </Image>
     <Image Include="visualOS 1.ico">

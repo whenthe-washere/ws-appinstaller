@@ -1,4 +1,4 @@
-﻿// whenthe's app installer.cpp : Defines the entry point for the application.
+// whenthe's app installer.cpp : Defines the entry point for the application.
 
 #include "whenthe's app installer.h"
 #include "framework.h"
@@ -12,6 +12,7 @@
 #include <shlobj.h>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <urlmon.h>
 #include <vector>
 #include <windows.h>
@@ -19,10 +20,18 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "msimg32.lib")
+#include <combaseapi.h>
+#include <shlguid.h>
+#include <shobjidl.h>
+#include <wininet.h>
+#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
 
 #define MAX_LOADSTRING 1000
-#define CARD_HEIGHT 120
-#define CARD_WIDTH 350
+#define CARD_HEIGHT 205
+#define CARD_WIDTH 200
 #define CARD_MARGIN 20
 #define CARD_BUTTON_ID 4001
 #define ID_APP_LOGO 6001
@@ -30,14 +39,10 @@
 #define DRAG_TIMER_ID 6003
 #define ID_DIRECT_INSTALL_BUTTON 6004
 #define ID_LONGPRESS_TIMER 6005
-// Sidebar and search toggle IDs
-#define ID_SIDEBAR 9000
-#define ID_SIDEBAR_LIST 9001
-#define ID_SIDEBAR_ABOUT_BTN 9002
-#define ID_SEARCH_TOGGLE_BTN 7002
-#define ID_SIDEBAR_TOGGLE_BTN 9003
-// Sidebar search edit
-#define ID_SIDEBAR_SEARCH_EDIT 9004
+// Add IDs for details pane controls
+#define ID_ABOUT_BTN 9500
+#define ID_ABOUT_CARD 9501
+// Sidebar search edit removed
 // Add IDs for details pane controls
 #define ID_DETAILS_ICON 8001
 #define ID_DETAILS_TITLE 8002
@@ -48,91 +53,183 @@
 #define ID_EE_TEXT1 8101
 #define ID_EE_TEXT2 8102
 #define ID_EE_REST 8103
+#define ID_QUEUE_BTN 8104
+#define ID_DOWNLOAD_ALL_BTN 8105
+#define ID_BACK_TO_APPS_BTN 8106
+
+#define ID_SETTINGS_BTN 8107
+#define ID_THEME_LIGHT 8108
+#define ID_THEME_DARK 8109
+#define ID_THEME_AMOLED 8110
+#define ID_TEXT_SIZE_INC 8111
+#define ID_TEXT_SIZE_DEC 8112
+#define ID_SET_BROWSE 8113
+#define ID_SET_PATH_EDIT 8114
+
+enum ViewMode { VIEW_APPS, VIEW_QUEUE, VIEW_SETTINGS };
+static ViewMode g_viewMode = VIEW_APPS;
+static std::vector<int> g_downloadQueue; // Stores indices (0-5)
+static HWND hQueueBtn = nullptr;
+static HWND hDownloadAllBtn = nullptr;
+static HWND hBackBtn = nullptr;
+static HWND hSettingsBtn = nullptr;
+static HWND hSetPathEdit = nullptr;
+static HWND hSetBrowseBtn = nullptr;
+
+enum Theme { THEME_LIGHT, THEME_DARK, THEME_AMOLED };
+static Theme g_currentTheme = THEME_DARK;
+static int g_textSizePercent = 100;
+static std::wstring g_downloadLocation = L"";
+static bool g_useSmartDownload = true;
+static bool g_askEveryTime = false;
 
 // Add this struct at the top (after includes)
 struct CardData {
-    wchar_t title[64];
-    wchar_t description[256];
-    wchar_t url[256];
+  wchar_t title[64];
+  wchar_t description[256];
+  wchar_t url[256];
+  wchar_t version[32]; // Added version field
 };
 
+static bool g_isMenuOpen = false;
+
 // Selected app info for details pane
-static CardData g_selected = { L"", L"", L"" };
+static CardData g_selected = {L"", L"", L""};
 static HICON g_selectedIcon = nullptr;
+static int g_expandedIndex = -1;
+static HWND hAboutBtn = nullptr;
+static HWND hAboutCard = nullptr;
+static bool g_showAbout = false;
+
+struct InstallInfo {
+  std::wstring filePath;
+  std::wstring appName;
+  std::wstring version;
+};
+
+static void CheckForAppUpdates(HWND hWnd);
+static void PerformInstallation(HWND hWnd, struct InstallInfo *info);
+void DownloadAndInstall(HWND hWnd, LPCWSTR url, LPCWSTR localPath,
+                        LPCWSTR appName, LPCWSTR version);
+
+static std::wstring g_latestVersions[6] = {L"", L"", L"", L"", L"", L""};
 
 HFONT hFont = nullptr; // Declare hFont as a global variable
 static HBRUSH hWhiteBrush =
-CreateSolidBrush(RGB(30, 30, 60)); // dark background
+    CreateSolidBrush(RGB(30, 30, 60)); // dark background
 static HBRUSH hMainBgBrush = CreateSolidBrush(RGB(20, 20, 40)); // main bg
-HICON hCardIcons[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+
+// whenthesspace.vercel.app palette colors
+#define WS_LIGHT_BG      RGB(204, 204, 255)  // #CCCCFF periwinkle
+#define WS_LIGHT_SURFACE RGB(250, 250, 255)  // Glass card surface
+#define WS_LIGHT_TEXT    RGB(26, 26, 46)    // #1a1a2e dark navy
+#define WS_PRIMARY       RGB(166, 166, 255)  // #A6A6FF primary accent
+#define WS_PRIMARY_GLOW  RGB(100, 180, 255)  // Bright accent for borders
+HICON hCardIcons[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
 // Per-card averaged icon color (sampled once after icons are loaded)
-static COLORREF g_cardAvgColor[6] = {
-    RGB(30,30,60), RGB(30,30,60), RGB(30,30,60),
-    RGB(30,30,60), RGB(30,30,60), RGB(30,30,60)
-};
+static COLORREF g_cardAvgColor[6] = {RGB(30, 30, 60), RGB(30, 30, 60),
+                                     RGB(30, 30, 60), RGB(30, 30, 60),
+                                     RGB(30, 30, 60), RGB(30, 30, 60)};
 
 // Sample the average non-dark color from an HICON by rendering into a DIB
 static COLORREF SampleIconAvgColor(HICON hIcon) {
-    if (!hIcon) return RGB(30, 30, 60);
-    const int SZ = 32;
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMem = CreateCompatibleDC(hdcScreen);
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = SZ;
-    bmi.bmiHeader.biHeight = -SZ;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    VOID* pBits = nullptr;
-    HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
-    if (!hBmp) { DeleteDC(hdcMem); ReleaseDC(nullptr, hdcScreen); return RGB(30, 30, 60); }
-    HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, hBmp);
-    RECT rc = { 0, 0, SZ, SZ };
-    FillRect(hdcMem, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-    DrawIconEx(hdcMem, 0, 0, hIcon, SZ, SZ, 0, nullptr, DI_NORMAL);
-    GdiFlush();
-    DWORD* px = (DWORD*)pBits;
-    long long rSum = 0, gSum = 0, bSum = 0, count = 0;
-    for (int i = 0; i < SZ * SZ; i++) {
-        BYTE b2 = (px[i] >> 0) & 0xFF;
-        BYTE g2 = (px[i] >> 8) & 0xFF;
-        BYTE r2 = (px[i] >> 16) & 0xFF;
-        if (r2 + g2 + b2 > 60) { rSum += r2; gSum += g2; bSum += b2; count++; }
-    }
-    SelectObject(hdcMem, hOld);
-    DeleteObject(hBmp);
+  if (!hIcon)
+    return RGB(30, 30, 60);
+  const int SZ = 32;
+  HDC hdcScreen = GetDC(nullptr);
+  HDC hdcMem = CreateCompatibleDC(hdcScreen);
+  BITMAPINFO bmi = {};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = SZ;
+  bmi.bmiHeader.biHeight = -SZ;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  VOID *pBits = nullptr;
+  HBITMAP hBmp =
+      CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+  if (!hBmp) {
     DeleteDC(hdcMem);
     ReleaseDC(nullptr, hdcScreen);
-    if (count == 0) return RGB(30, 30, 60);
-    return RGB((BYTE)(rSum / count), (BYTE)(gSum / count), (BYTE)(bSum / count));
+    return RGB(30, 30, 60);
+  }
+  HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, hBmp);
+  RECT rc = {0, 0, SZ, SZ};
+  FillRect(hdcMem, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+  DrawIconEx(hdcMem, 0, 0, hIcon, SZ, SZ, 0, nullptr, DI_NORMAL);
+  GdiFlush();
+  DWORD *px = (DWORD *)pBits;
+  long long rSum = 0, gSum = 0, bSum = 0, count = 0;
+  for (int i = 0; i < SZ * SZ; i++) {
+    BYTE b2 = (px[i] >> 0) & 0xFF;
+    BYTE g2 = (px[i] >> 8) & 0xFF;
+    BYTE r2 = (px[i] >> 16) & 0xFF;
+    if (r2 + g2 + b2 > 60) {
+      rSum += r2;
+      gSum += g2;
+      bSum += b2;
+      count++;
+    }
+  }
+  SelectObject(hdcMem, hOld);
+  DeleteObject(hBmp);
+  DeleteDC(hdcMem);
+  ReleaseDC(nullptr, hdcScreen);
+  if (count == 0)
+    return RGB(30, 30, 60);
+  return RGB((BYTE)(rSum / count), (BYTE)(gSum / count), (BYTE)(bSum / count));
 }
 // Card bg: 20% icon color mixed into dark base (30,30,60)
 static COLORREF DarkenForCard(COLORREF c) {
-    BYTE r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-    return RGB(
-        (BYTE)(30 + ((int)r - 30) * 20 / 100),
-        (BYTE)(30 + ((int)g - 30) * 20 / 100),
-        (BYTE)(60 + ((int)b - 60) * 20 / 100)
-    );
+  BYTE r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+  return RGB((BYTE)(30 + ((int)r - 30) * 20 / 100),
+             (BYTE)(30 + ((int)g - 30) * 20 / 100),
+             (BYTE)(60 + ((int)b - 60) * 20 / 100));
 }
 // Border: slightly lighter than card bg
 static COLORREF LightenForBorder(COLORREF c) {
-    return RGB(
-        (BYTE)min(255, (int)GetRValue(c) + 22),
-        (BYTE)min(255, (int)GetGValue(c) + 22),
-        (BYTE)min(255, (int)GetBValue(c) + 22)
-    );
+  return RGB((BYTE)min(255, (int)GetRValue(c) + 22),
+             (BYTE)min(255, (int)GetGValue(c) + 22),
+             (BYTE)min(255, (int)GetBValue(c) + 22));
 }
 // Text: white (220,220,220) with 12% icon tint
 static COLORREF TintForText(COLORREF c) {
-    BYTE r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
-    return RGB(
-        (BYTE)(220 + ((int)r - 220) * 12 / 100),
-        (BYTE)(220 + ((int)g - 220) * 12 / 100),
-        (BYTE)(220 + ((int)b - 220) * 12 / 100)
-    );
+  BYTE r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+  return RGB((BYTE)(220 + ((int)r - 220) * 12 / 100),
+             (BYTE)(220 + ((int)g - 220) * 12 / 100),
+             (BYTE)(220 + ((int)b - 220) * 12 / 100));
+}
+
+// Theme-aware background color for the main window
+// Using whenthesspace.vercel.app palette
+static COLORREF GetMainBgColor() {
+  switch (g_currentTheme) {
+  case THEME_LIGHT:  return RGB(204, 204, 255);  // #CCCCFF periwinkle bg
+  case THEME_AMOLED: return RGB(0, 0, 0);
+  default:           return RGB(20, 20, 40);
+  }
+}
+
+// Theme-aware background color for cards
+// Using whenthesspace.vercel.app palette - glass surface style
+static COLORREF GetCardBgColor(COLORREF avgColor) {
+  switch (g_currentTheme) {
+  case THEME_LIGHT:
+    // White/lavender tinted surface instead of icon-based colors
+    return RGB(250, 250, 255);  // Near-white with slight blue tint
+  case THEME_AMOLED: return RGB(10, 10, 10);
+  default:           return DarkenForCard(avgColor);
+  }
+}
+
+// Theme-aware text color for cards (renamed to avoid Win32 GetTextColor clash)
+// Using whenthesspace.vercel.app palette
+static COLORREF GetCardTextColor(COLORREF avgColor) {
+  switch (g_currentTheme) {
+  case THEME_LIGHT:  return RGB(26, 26, 46);  // #1a1a2e dark navy text
+  default:           return TintForText(avgColor);
+  }
 }
 
 HINSTANCE hInst = nullptr; // Move this here, before any function uses it
@@ -175,7 +272,20 @@ static COLORREF eeColor1 = RGB(220, 220, 220);
 static COLORREF eeColor2 = RGB(220, 220, 220);
 static int eeStage = 0; // 0: Start, 1: T1, 2: T1->T2, 3: T1->T2->T1, 4: WIN
 
-void StartSpaceShooter(HINSTANCE hInstance);
+// Add DPI scaling support
+static int GetDPI(HWND hWnd) {
+  HDC hdc = GetDC(hWnd);
+  int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+  ReleaseDC(hWnd, hdc);
+  return dpi;
+}
+
+static int Scale(int val, int dpi) { return MulDiv(val, dpi, 96) * g_textSizePercent / 100; }
+
+// Softcoded downloadable extensions
+static std::vector<std::wstring> g_downloadableExtensions = {
+    L"zip", L"exe", L"msi", L"msix", L"7z",
+    L"rar", L"tar", L"gz",  L"deb",  L"rpm"};
 
 // Content scrolling
 static int g_scrollOffsetY = 0; // current scroll offset for main card area
@@ -185,254 +295,273 @@ static int g_contentHeight = 0; // total virtual content height (cards area)
 extern HWND hStatusLabel;
 
 // Helper to detect whether a URL likely points to a downloadable file
-static bool IsDownloadableUrl(const std::wstring& url) {
-    if (url.empty())
-        return false;
-    // find last dot after last slash
-    size_t lastSlash = url.find_last_of(L"/\\");
-    size_t lastDot = url.find_last_of(L'.');
-    if (lastDot == std::wstring::npos ||
-        (lastSlash != std::wstring::npos && lastDot < lastSlash))
-        return false;
-    std::wstring ext = url.substr(lastDot + 1);
-    for (auto& ch : ext)
-        ch = (wchar_t)towlower(ch);
-    const std::wstring known[] = { L"zip", L"exe", L"msi", L"msix", L"7z",
-                                  L"rar", L"tar", L"gz",  L"deb",  L"rpm" };
-    for (auto& k : known)
-        if (ext == k)
-            return true;
+static bool IsDownloadableUrl(const std::wstring &url) {
+  if (url.empty())
     return false;
+  size_t lastDot = url.find_last_of(L'.');
+  if (lastDot == std::wstring::npos)
+    return false;
+  std::wstring ext = url.substr(lastDot + 1);
+  for (auto &ch : ext)
+    ch = (wchar_t)towlower(ch);
+  for (const auto &k : g_downloadableExtensions)
+    if (ext == k)
+      return true;
+  return false;
 }
 
 // Helper to update layout when window size or sidebar visibility changes
 // Force a full redraw of the window and its children
 static void RefreshUI(HWND hWnd) {
-    RedrawWindow(hWnd, nullptr, nullptr,
-        RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE);
-    if (hSidebar) {
-        RedrawWindow(hSidebar, nullptr, nullptr,
-            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE);
-    }
+  RedrawWindow(hWnd, nullptr, nullptr,
+               RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE);
+  if (hSidebar) {
+    RedrawWindow(hSidebar, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE);
+  }
 }
 
 // Layout the InfoBar contents dynamically based on description text height
 static void LayoutInfoBar(HWND hWnd, int rightX, int rightY,
-    int rightPanelWidth, int rightPanelHeight) {
-    int iconX = rightX + 20;
-    int iconY = rightY + 20;
-    int titleX = rightX + 60;
-    int titleY = rightY + 20;
-    int descX = rightX + 20;
-    int descY = rightY + 60;
-    // If EE text lines are visible (about view), push desc below them
-    if (hEEText1 && IsWindowVisible(hEEText1))
-        descY = rightY + 60 + 24 + 24 + 6; // Text1 + Text2 + gap
-    int descW = rightPanelWidth - 40;
+                          int rightPanelWidth, int rightPanelHeight) {
+  int dpi = GetDPI(hWnd);
+  int iconX = rightX + Scale(20, dpi);
+  int iconY = rightY + Scale(20, dpi);
+  int titleX = rightX + Scale(60, dpi);
+  int titleY = rightY + Scale(20, dpi);
+  int descX = rightX + Scale(20, dpi);
+  int descY = rightY + Scale(60, dpi);
+  // If EE text lines are visible (about view), push desc below them
+  if (hEEText1 && IsWindowVisible(hEEText1))
+    descY = rightY + Scale(60 + 24 + 24 + 6, dpi); // Text1 + Text2 + gap
+  int descW = rightPanelWidth - Scale(40, dpi);
 
-    int descH = 120;
-    if (hDetailsDesc) {
-        wchar_t buf[4096];
-        GetWindowTextW(hDetailsDesc, buf, 4096);
-        HDC hdc = GetDC(hWnd);
-        HFONT old = (HFONT)SelectObject(hdc, hFont);
-        RECT rcCalc{ 0, 0, descW, 0 };
-        DrawTextW(hdc, buf, -1, &rcCalc, DT_WORDBREAK | DT_CALCRECT);
-        SelectObject(hdc, old);
-        ReleaseDC(hWnd, hdc);
-        int h = rcCalc.bottom - rcCalc.top;
-        if (h > descH)
-            descH = h;
-        int maxDescH = max(0, rightPanelHeight - (descY - rightY) - 200);
-        if (maxDescH > 0)
-            descH = min(descH, maxDescH);
-    }
+  int descH = Scale(120, dpi);
+  if (hDetailsDesc) {
+    wchar_t buf[4096];
+    GetWindowTextW(hDetailsDesc, buf, 4096);
+    HDC hdc = GetDC(hWnd);
+    HFONT old = (HFONT)SelectObject(hdc, hFont);
+    RECT rcCalc{0, 0, descW, 0};
+    DrawTextW(hdc, buf, -1, &rcCalc, DT_WORDBREAK | DT_CALCRECT);
+    SelectObject(hdc, old);
+    ReleaseDC(hWnd, hdc);
+    int h = rcCalc.bottom - rcCalc.top;
+    if (h > descH)
+      descH = h;
+    int maxDescH =
+        max(0, rightPanelHeight - (descY - rightY) - Scale(200, dpi));
+    if (maxDescH > 0)
+      descH = min(descH, maxDescH);
+  }
 
-    if (hDetailsIcon)
-        MoveWindow(hDetailsIcon, iconX, iconY, 32, 32, TRUE);
-    if (hDetailsTitle)
-        MoveWindow(hDetailsTitle, titleX, titleY, rightPanelWidth - 80, 24, TRUE);
-    if (hDetailsDesc)
-        MoveWindow(hDetailsDesc, descX, descY, descW, descH, TRUE);
+  if (hDetailsIcon)
+    MoveWindow(hDetailsIcon, iconX, iconY, Scale(32, dpi), Scale(32, dpi),
+               TRUE);
+  if (hDetailsTitle)
+    MoveWindow(hDetailsTitle, titleX, titleY, rightPanelWidth - Scale(80, dpi),
+               Scale(24, dpi), TRUE);
+  if (hDetailsDesc)
+    MoveWindow(hDetailsDesc, descX, descY, descW, descH, TRUE);
 
-    int btnY = descY + descH + 10;
-    if (hDetailsInstallBtn)
-        MoveWindow(hDetailsInstallBtn, descX, btnY, rightPanelWidth - 40, 36, TRUE);
-    int statusY = btnY + 50;
-    if (hStatusLabel)
-        MoveWindow(hStatusLabel, descX, statusY, rightPanelWidth - 60, 20, TRUE);
-    if (hProgressBar)
-        MoveWindow(hProgressBar, descX, statusY + 25, rightPanelWidth - 60, 18,
-            TRUE);
+  int bottomMargin = Scale(20, dpi); // Margin from bottom
+  int progressH = Scale(18, dpi);
+  int statusH = Scale(20, dpi);
+  int btnH = Scale(36, dpi);
+
+  // Bottom-up: progress bar, status label, button
+  int progressY = rightY + rightPanelHeight - bottomMargin - progressH;
+  int statusY = progressY - statusH - Scale(5, dpi);
+  int btnY = statusY - btnH - Scale(10, dpi);
+
+  if (hDetailsInstallBtn)
+    MoveWindow(hDetailsInstallBtn, descX, btnY,
+               rightPanelWidth - Scale(40, dpi), btnH, TRUE);
+  if (hStatusLabel)
+    MoveWindow(hStatusLabel, descX, statusY, rightPanelWidth - Scale(60, dpi),
+               statusH, TRUE);
+  if (hProgressBar)
+    MoveWindow(hProgressBar, descX, progressY, rightPanelWidth - Scale(60, dpi),
+               progressH, TRUE);
 }
 
 // Layout Easter Egg controls
 static void LayoutEasterEgg(HWND hWnd, int rightX, int rightY,
-    int rightPanelWidth) {
-    if (!hEEText1 || !IsWindowVisible(hEEText1))
-        return;
+                            int rightPanelWidth) {
+  if (!hEEText1 || !IsWindowVisible(hEEText1))
+    return;
 
-    int descX = rightX + 20;
-    int curY = rightY + 60; // Start where DetailsDesc starts
+  int dpi = GetDPI(hWnd);
+  int descX = rightX + Scale(20, dpi);
+  int curY = rightY + Scale(60, dpi); // Start where DetailsDesc starts
 
-    // Interactive Text Lines first
-    int text1W = 230;
-    int text2W = 100;
-    MoveWindow(hEEText1, descX, curY, text1W, 24, TRUE);
-    curY += 24;
-    MoveWindow(hEEText2, descX, curY, text2W, 24, TRUE);
-    curY += 24 + 6; // small gap before aboutDesc
+  // Interactive Text Lines first
+  int text1W = Scale(230, dpi);
+  int text2W = Scale(100, dpi);
+  MoveWindow(hEEText1, descX, curY, text1W, Scale(24, dpi), TRUE);
+  curY += Scale(24, dpi);
+  MoveWindow(hEEText2, descX, curY, text2W, Scale(24, dpi), TRUE);
+  curY += Scale(24 + 6, dpi); // small gap before aboutDesc
 
-    // aboutDesc (release notes) below the two text lines
-    int noticeH = 100;
-    MoveWindow(hEENotice, descX, curY, rightPanelWidth - 40, noticeH, TRUE);
-    curY += noticeH;
+  // aboutDesc (release notes) below the two text lines
+  int noticeH = 100;
+  MoveWindow(hEENotice, descX, curY, rightPanelWidth - 40, noticeH, TRUE);
+  curY += noticeH;
 
-    // Rest of text "----------------..."
-    MoveWindow(hEERest, descX, curY, rightPanelWidth - 40, 100, TRUE);
+  // Rest of text "----------------..."
+  MoveWindow(hEERest, descX, curY, rightPanelWidth - 40, 100, TRUE);
 }
 
 static void UpdateLayout(HWND hWnd) {
-    RECT rc;
-    GetClientRect(hWnd, &rc);
-    const int padding = 20;
-    const int rightPanelWidth = 300;
-    const int sidebarMargin = 10; // Margin for floating effect
+  RECT rc;
+  GetClientRect(hWnd, &rc);
+  int dpi = GetDPI(hWnd);
+  const int padding = Scale(20, dpi);
 
-    // Calculate content area based on sidebar visibility
-    int contentLeft = padding;
-    int contentWidth = rc.right - padding;
+  int sCardWidth = Scale(CARD_WIDTH, dpi);
+  int sCardHeight = Scale(CARD_HEIGHT, dpi);
+  int sCardMargin = Scale(CARD_MARGIN, dpi);
 
-    if (g_sidebarVisible) {
-        // When sidebar is visible, content starts after sidebar
-        contentLeft = SIDEBAR_W + padding;
-        contentWidth = rc.right - SIDEBAR_W - padding * 2 - rightPanelWidth -
-            sidebarMargin * 2;
+  // Calculate content area
+  int contentLeft = padding;
+  int contentWidth = rc.right - padding * 2;
+
+  if (hMainTitle)
+    MoveWindow(hMainTitle, padding, Scale(10, dpi),
+               max(Scale(300, dpi), contentWidth), Scale(40, dpi), TRUE);
+
+  // Settings button at bottom-right
+  if (hSettingsBtn) {
+    int btnSize = Scale(40, dpi);
+    MoveWindow(hSettingsBtn, rc.right - btnSize - Scale(20, dpi),
+               rc.bottom - btnSize - Scale(20, dpi), btnSize, btnSize, TRUE);
+  }
+
+  // Queue button at bottom-right (left of settings)
+  if (hQueueBtn) {
+    int btnSize = Scale(40, dpi);
+    int setBtnSize = Scale(40, dpi);
+    MoveWindow(hQueueBtn, rc.right - setBtnSize - Scale(20, dpi) - btnSize - Scale(10, dpi),
+               rc.bottom - btnSize - Scale(20, dpi), btnSize, btnSize, TRUE);
+  }
+
+  if (hDownloadAllBtn) {
+    int btnW = Scale(150, dpi);
+    int btnH = Scale(40, dpi);
+    MoveWindow(hDownloadAllBtn, rc.right - btnW - Scale(20, dpi),
+               Scale(10, dpi), btnW, btnH, TRUE);
+    ShowWindow(hDownloadAllBtn, g_viewMode == VIEW_QUEUE ? SW_SHOW : SW_HIDE);
+  }
+
+  if (hBackBtn) {
+    int btnW = Scale(40, dpi);
+    int btnH = Scale(40, dpi);
+    MoveWindow(hBackBtn, Scale(20, dpi), Scale(10, dpi), btnW, btnH, TRUE);
+    ShowWindow(hBackBtn, (g_viewMode == VIEW_QUEUE || g_viewMode == VIEW_SETTINGS) ? SW_SHOW : SW_HIDE);
+  }
+
+  if (hMainTitle) {
+    ShowWindow(hMainTitle, g_viewMode == VIEW_APPS ? SW_SHOW : SW_HIDE);
+    if (g_viewMode == VIEW_APPS)
+      MoveWindow(hMainTitle, padding, Scale(10, dpi),
+                 max(Scale(300, dpi), contentWidth), Scale(40, dpi), TRUE);
+  }
+
+  if (hSetPathEdit) {
+    ShowWindow(hSetPathEdit, g_viewMode == VIEW_SETTINGS ? SW_SHOW : SW_HIDE);
+    if (g_viewMode == VIEW_SETTINGS) {
+      int editY = Scale(260, dpi) - g_scrollOffsetY;
+      MoveWindow(hSetPathEdit, Scale(28, dpi), editY, rc.right - Scale(130, dpi), Scale(26, dpi), TRUE);
+    }
+  }
+  if (hSetBrowseBtn) {
+    ShowWindow(hSetBrowseBtn, g_viewMode == VIEW_SETTINGS ? SW_SHOW : SW_HIDE);
+    if (g_viewMode == VIEW_SETTINGS) {
+      int editY = Scale(260, dpi) - g_scrollOffsetY;
+      MoveWindow(hSetBrowseBtn, rc.right - Scale(98, dpi), editY, Scale(88, dpi), Scale(26, dpi), TRUE);
+    }
+  }
+  int availableWidth = contentWidth;
+  if (availableWidth < sCardWidth)
+    availableWidth = sCardWidth;
+  int perCol = availableWidth / (sCardWidth + sCardMargin);
+  if (perCol < 1)
+    perCol = 1;
+  if (perCol > 5)
+    perCol = 5;
+
+  const int numCards = 6;
+  int lastBottom = Scale(60, dpi);
+  for (int i = 0; i < numCards; ++i) {
+    int col = i % perCol;
+    int row = i / perCol;
+    int x = contentLeft + col * (sCardWidth + sCardMargin);
+    int y = Scale(60, dpi) + row * (sCardHeight + sCardMargin);
+    HWND hCard = GetDlgItem(hWnd, 2001 + i);
+    if (hCard) {
+      if (g_viewMode == VIEW_APPS) {
+        ShowWindow(hCard, SW_SHOW);
+        MoveWindow(hCard, x, y - g_scrollOffsetY, sCardWidth, sCardHeight,
+                   TRUE);
+      } else {
+        ShowWindow(hCard, SW_HIDE);
+      }
+    }
+    int cardBottom = y + sCardHeight;
+    if (cardBottom > lastBottom)
+      lastBottom = cardBottom;
+  }
+  if (g_viewMode == VIEW_QUEUE) {
+    g_contentHeight =
+        Scale(100, dpi) + (int)g_downloadQueue.size() * Scale(60, dpi);
+  } else if (g_viewMode == VIEW_SETTINGS) {
+    g_contentHeight = Scale(600, dpi); // Fixed content height for settings
+  } else {
+    g_contentHeight = lastBottom + sCardMargin;
+  }
+
+  if (g_showAbout && hAboutCard) {
+    CardData *data = (CardData *)GetWindowLongPtr(hAboutCard, GWLP_USERDATA);
+    int aw = Scale(450, dpi);
+    int ah = Scale(300, dpi);
+    if (data) {
+      HDC hdc = GetDC(hAboutCard);
+      HFONT hDescFont =
+          CreateFontW(Scale(16, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+      HFONT oldFont = (HFONT)SelectObject(hdc, hDescFont);
+      RECT rcText = {0, 0, aw - Scale(40, dpi), 0};
+      DrawTextW(hdc, data->description, -1, &rcText,
+                DT_CALCRECT | DT_WORDBREAK | DT_LEFT);
+      ah = rcText.bottom +
+           Scale(160, dpi); // Title + padding + description + bottom buffer
+      SelectObject(hdc, oldFont);
+      DeleteObject(hDescFont);
+      ReleaseDC(hAboutCard, hdc);
     }
 
-    // Title and sidebar toggle button positioning
-    if (g_sidebarVisible) {
-        // When sidebar is visible, place toggle button inside the AppBar (sidebar)
-        // client area
-        if (hSidebarToggleBtn) {
-            HWND btnParent = GetParent(hSidebarToggleBtn);
-            if (btnParent != hSidebar) {
-                SetParent(hSidebarToggleBtn, hSidebar);
-            }
-            MoveWindow(hSidebarToggleBtn, 16, 12, 28, 28, TRUE);
-            SetWindowPos(hSidebarToggleBtn, HWND_TOP, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE);
-        }
-        if (hMainTitle)
-            MoveWindow(hMainTitle, contentLeft, 10, max(300, contentWidth - padding),
-                40, TRUE);
-    }
-    else {
-        // When sidebar is hidden, place toggle button at the main window's left
-        // edge
-        if (hSidebarToggleBtn) {
-            HWND btnParent = GetParent(hSidebarToggleBtn);
-            if (btnParent != hWnd) {
-                SetParent(hSidebarToggleBtn, hWnd);
-            }
-            MoveWindow(hSidebarToggleBtn, padding, 12, 28, 28, TRUE);
-            SetWindowPos(hSidebarToggleBtn, HWND_TOP, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE);
-        }
-        if (hMainTitle)
-            MoveWindow(hMainTitle, padding + 36, 10, max(300, contentWidth - padding),
-                40, TRUE);
-    }
+    MoveWindow(hAboutCard, (rc.right - aw) / 2, (rc.bottom - ah) / 2, aw, ah,
+               TRUE);
+    BringWindowToTop(hAboutCard);
+    SetWindowPos(hAboutCard, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+  }
 
-    // Right panel (InfoBar) - float inside window with margins
-    int rightX = rc.right - rightPanelWidth - sidebarMargin;
-    int rightY = sidebarMargin;
-    int rightHeight = rc.bottom - (sidebarMargin * 2);
-    if (hRightPanel)
-        MoveWindow(hRightPanel, rightX, rightY, rightPanelWidth, rightHeight, TRUE);
+  // configure scrollbar
+  int viewportHeight = rc.bottom - rc.top;
+  BOOL needScroll = g_contentHeight > viewportHeight;
+  ShowScrollBar(hWnd, SB_VERT, needScroll);
+  SCROLLINFO si{};
+  si.cbSize = sizeof(si);
+  si.fMask = SIF_PAGE | SIF_RANGE | SIF_POS;
+  si.nMin = 0;
+  si.nMax = g_contentHeight;
+  si.nPage = viewportHeight;
+  si.nPos = g_scrollOffsetY;
+  SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
 
-    // (Top-level search positioning removed)
-
-    // Dynamic InfoBar layout
-    LayoutInfoBar(hWnd, rightX, rightY, rightPanelWidth, rightHeight);
-    LayoutEasterEgg(hWnd, rightX, rightY, rightPanelWidth);
-
-    // AppBar (Left Sidebar) - float inside window with margins
-    if (hSidebar) {
-        MoveWindow(hSidebar, sidebarMargin, sidebarMargin,
-            SIDEBAR_W - sidebarMargin, rc.bottom - (sidebarMargin * 2),
-            TRUE);
-
-        // Layout sidebar children relative to the sidebar itself
-        RECT rcSb{};
-        GetClientRect(hSidebar, &rcSb);
-        int sidebarHeight = rcSb.bottom;
-        // Place About button at bottom
-        int aboutY = max(0, sidebarHeight - 44);
-        if (hSidebarAbout)
-            MoveWindow(hSidebarAbout, 16, aboutY, SIDEBAR_W - 32 - sidebarMargin, 28,
-                TRUE);
-
-        // Sidebar search edit right above the About button
-        int gap = 8; // space between search and about button
-        int searchH = 28;
-        int searchY = aboutY - gap - searchH;
-        if (hSidebarSearchEdit)
-            MoveWindow(hSidebarSearchEdit, 16, max(12, searchY),
-                SIDEBAR_W - 32 - sidebarMargin, searchH, TRUE);
-
-        // Sidebar list fills from top to just above the search box
-        int listTop = 50;
-        int listHeight = max(0, (searchY - 16) - listTop);
-        if (hSidebarList)
-            MoveWindow(hSidebarList, 16, listTop, SIDEBAR_W - 32 - sidebarMargin,
-                listHeight, TRUE);
-    }
-
-    // Cards layout - positioned in content area with adjusted width
-    int availableWidth = rightX - contentLeft - padding - sidebarMargin;
-    if (availableWidth < CARD_WIDTH)
-        availableWidth = CARD_WIDTH;
-    int perCol = availableWidth / (CARD_WIDTH + CARD_MARGIN);
-    if (perCol < 1)
-        perCol = 1;
-    if (perCol > 3)
-        perCol = 3;
-
-    const int numCards = 6;
-    int lastBottom = 60;
-    for (int i = 0; i < numCards; ++i) {
-        int col = i % perCol;
-        int row = i / perCol;
-        int x = contentLeft + col * (CARD_WIDTH + CARD_MARGIN);
-        int y = 60 + row * (CARD_HEIGHT + CARD_MARGIN);
-        HWND hCard = GetDlgItem(hWnd, 2001 + i);
-        if (hCard) {
-            // apply vertical scroll offset
-            MoveWindow(hCard, x, y - g_scrollOffsetY, CARD_WIDTH, CARD_HEIGHT, TRUE);
-        }
-        int cardBottom = y + CARD_HEIGHT;
-        if (cardBottom > lastBottom)
-            lastBottom = cardBottom;
-    }
-    // compute content height for scrolling (bottom of last row + padding)
-    g_contentHeight = lastBottom + CARD_MARGIN;
-
-    // configure scrollbar visibility and range
-    int viewportHeight = rc.bottom - rc.top;
-    BOOL needScroll = g_contentHeight > viewportHeight;
-    ShowScrollBar(hWnd, SB_VERT, needScroll);
-    SCROLLINFO si{};
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_PAGE | SIF_RANGE | SIF_POS;
-    si.nMin = 0;
-    si.nMax = g_contentHeight;
-    si.nPage = viewportHeight;
-    si.nPos = g_scrollOffsetY;
-    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
-
-    // After layout adjustments, force a redraw to avoid visual artifacts
-    RefreshUI(hWnd);
+  // After layout adjustments, force a redraw to avoid visual artifacts
+  RefreshUI(hWnd);
 }
 
 // Add this global variable above (after hInst declaration)
@@ -443,148 +572,148 @@ static WNDPROC OldSidebarListProc = nullptr;
 // Sidebar subclass proc to paint background, layout children, and forward
 // notifications
 LRESULT CALLBACK SidebarProc(HWND hwnd, UINT msg, WPARAM wParam,
-    LPARAM lParam) {
-    switch (msg) {
-    case WM_COMMAND:
-        // Forward child notifications to the main window so existing handlers work
-        return SendMessage(GetParent(hwnd), WM_COMMAND, wParam, lParam);
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
+                             LPARAM lParam) {
+  switch (msg) {
+  case WM_COMMAND:
+    // Forward child notifications to the main window so existing handlers work
+    return SendMessage(GetParent(hwnd), WM_COMMAND, wParam, lParam);
+  case WM_ERASEBKGND:
+    return 1;
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
 
-        // Create rounded rectangle background
-        HBRUSH hBrushSidebar = CreateSolidBrush(RGB(30, 30, 60));
-        SelectObject(hdc, hBrushSidebar);
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 20, 20);
-        DeleteObject(hBrushSidebar);
+    // Create rounded rectangle background
+    HBRUSH hBrushSidebar = CreateSolidBrush(RGB(30, 30, 60));
+    SelectObject(hdc, hBrushSidebar);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 20, 20);
+    DeleteObject(hBrushSidebar);
 
-        // Draw border
-        HPEN hBorderPen = CreatePen(PS_SOLID, 1, RGB(40, 40, 70));
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hBorderPen);
-        HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 20, 20);
-        SelectObject(hdc, hOldPen);
-        SelectObject(hdc, hOldBrush);
-        DeleteObject(hBorderPen);
+    // Draw border
+    HPEN hBorderPen = CreatePen(PS_SOLID, 1, RGB(40, 40, 70));
+    HPEN hOldPen = (HPEN)SelectObject(hdc, hBorderPen);
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 20, 20);
+    SelectObject(hdc, hOldPen);
+    SelectObject(hdc, hOldBrush);
+    DeleteObject(hBorderPen);
 
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    case WM_CTLCOLORSTATIC: {
-        SetBkColor((HDC)wParam, RGB(30, 30, 60));
-        SetTextColor((HDC)wParam, RGB(220, 220, 220));
-        static HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 60));
-        return (INT_PTR)hBrush;
-    }
-    case WM_CTLCOLORLISTBOX: {
-        HDC hdc = (HDC)wParam;
-        SetBkColor(hdc, RGB(30, 30, 60));
-        SetTextColor(hdc, RGB(220, 220, 220));
-        static HBRUSH hListBrush = CreateSolidBrush(RGB(30, 30, 60));
-        return (INT_PTR)hListBrush;
-    }
-    default:
-        return CallWindowProc(OldSidebarProc, hwnd, msg, wParam, lParam);
-    }
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_CTLCOLORSTATIC: {
+    SetBkColor((HDC)wParam, RGB(30, 30, 60));
+    SetTextColor((HDC)wParam, RGB(220, 220, 220));
+    static HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 60));
+    return (INT_PTR)hBrush;
+  }
+  case WM_CTLCOLORLISTBOX: {
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, RGB(30, 30, 60));
+    SetTextColor(hdc, RGB(220, 220, 220));
+    static HBRUSH hListBrush = CreateSolidBrush(RGB(30, 30, 60));
+    return (INT_PTR)hListBrush;
+  }
+  default:
+    return CallWindowProc(OldSidebarProc, hwnd, msg, wParam, lParam);
+  }
 }
 
 // New window procedure for the drag icon control that draws an outline.
 LRESULT CALLBACK IconDragProc(HWND hwnd, UINT msg, WPARAM wParam,
-    LPARAM lParam) {
-    switch (msg) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
+                              LPARAM lParam) {
+  switch (msg) {
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
 
-        // Let the default proc paint the icon/control first.
-        CallWindowProc(OldIconDragProc, hwnd, msg, wParam, lParam);
+    // Let the default proc paint the icon/control first.
+    CallWindowProc(OldIconDragProc, hwnd, msg, wParam, lParam);
 
-        // Draw a visible red border around the whole control.
-        RECT rect;
-        GetClientRect(hwnd, &rect);
-        HPEN hPen = CreatePen(PS_SOLID, 3, RGB(0, 0, 0)); // Black, thicker border
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-        HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
-        SelectObject(hdc, hOldPen);
-        SelectObject(hdc, hOldBrush);
-        DeleteObject(hPen);
+    // Draw a visible red border around the whole control.
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    HPEN hPen = CreatePen(PS_SOLID, 3, RGB(0, 0, 0)); // Black, thicker border
+    HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, rect.left, rect.top, rect.right, rect.bottom);
+    SelectObject(hdc, hOldPen);
+    SelectObject(hdc, hOldBrush);
+    DeleteObject(hPen);
 
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    default:
-        return CallWindowProc(OldIconDragProc, hwnd, msg, wParam, lParam);
-    }
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  default:
+    return CallWindowProc(OldIconDragProc, hwnd, msg, wParam, lParam);
+  }
 }
 
 std::wstring GetDownloadsPath() {
-    PWSTR path = nullptr;
-    std::wstring result;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, NULL, &path))) {
-        result = path;
-        CoTaskMemFree(path);
-    }
-    return result;
+  PWSTR path = nullptr;
+  std::wstring result;
+  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, NULL, &path))) {
+    result = path;
+    CoTaskMemFree(path);
+  }
+  return result;
 }
 
-std::wstring GetFileNameFromUrl(const std::wstring& url) {
-    size_t pos = url.find_last_of(L"/\\");
-    if (pos != std::wstring::npos && pos + 1 < url.length())
-        return url.substr(pos + 1);
-    return L"downloaded_file";
+std::wstring GetFileNameFromUrl(const std::wstring &url) {
+  size_t pos = url.find_last_of(L"/\\");
+  if (pos != std::wstring::npos && pos + 1 < url.length())
+    return url.substr(pos + 1);
+  return L"downloaded_file";
 }
 
 // Define your repo info and current version
-const wchar_t* GITHUB_TAGS_URL =
-L"https://api.github.com/repos/whenthe-washere/whenthes-app-installer/tags";
-const wchar_t* CURRENT_VERSION = L"2.00.5";
+const wchar_t *GITHUB_TAGS_URL =
+    L"https://api.github.com/repos/whenthe-washere/whenthes-app-installer/tags";
+const wchar_t *CURRENT_VERSION = L"2.00.5";
 
-bool IsNewerVersionAvailable(const std::wstring& latestTag) {
-    // Simple string comparison, can be improved for semantic versioning
-    return latestTag != CURRENT_VERSION;
+bool IsNewerVersionAvailable(const std::wstring &latestTag) {
+  // Simple string comparison, can be improved for semantic versioning
+  return latestTag != CURRENT_VERSION;
 }
 
-std::wstring GetLatestTagFromJson(const std::wstring& json) {
-    // Very basic: look for "name":"vX.Y.Z"
-    size_t pos = json.find(L"\"name\":\"");
-    if (pos == std::wstring::npos)
-        return L"";
-    pos += 8;
-    size_t end = json.find(L"\"", pos);
-    if (end == std::wstring::npos)
-        return L"";
-    return json.substr(pos, end - pos);
+std::wstring GetLatestTagFromJson(const std::wstring &json) {
+  // Very basic: look for "name":"vX.Y.Z"
+  size_t pos = json.find(L"\"name\":\"");
+  if (pos == std::wstring::npos)
+    return L"";
+  pos += 8;
+  size_t end = json.find(L"\"", pos);
+  if (end == std::wstring::npos)
+    return L"";
+  return json.substr(pos, end - pos);
 }
 
 void CheckForUpdates(HWND hWnd) {
-    // Download tags JSON to a temp file
-    wchar_t tempPath[MAX_PATH];
-    GetTempPathW(MAX_PATH, tempPath);
-    std::wstring tempFile = std::wstring(tempPath) + L"tags.json";
-    HRESULT hr = URLDownloadToFileW(nullptr, GITHUB_TAGS_URL, tempFile.c_str(), 0,
-        nullptr);
+  // Download tags JSON to a temp file
+  wchar_t tempPath[MAX_PATH];
+  GetTempPathW(MAX_PATH, tempPath);
+  std::wstring tempFile = std::wstring(tempPath) + L"tags.json";
+  HRESULT hr = URLDownloadToFileW(nullptr, GITHUB_TAGS_URL, tempFile.c_str(), 0,
+                                  nullptr);
 
-    if (SUCCEEDED(hr)) {
-        // Read file content
-        std::wifstream file(tempFile);
-        std::wstringstream buffer;
-        buffer << file.rdbuf();
-        std::wstring json = buffer.str();
+  if (SUCCEEDED(hr)) {
+    // Read file content
+    std::wifstream file(tempFile);
+    std::wstringstream buffer;
+    buffer << file.rdbuf();
+    std::wstring json = buffer.str();
 
-        std::wstring latestTag = GetLatestTagFromJson(json);
-        if (!latestTag.empty() && IsNewerVersionAvailable(latestTag)) {
-            std::wstring msg =
-                L"Update available: " + latestTag +
-                L"\nCheck WAI Releases in GitHub(repository: ws-appinstaller)";
-            MessageBoxW(hWnd, msg.c_str(), L"Update Available", MB_ICONINFORMATION);
-        }
-        DeleteFileW(tempFile.c_str());
+    std::wstring latestTag = GetLatestTagFromJson(json);
+    if (!latestTag.empty() && IsNewerVersionAvailable(latestTag)) {
+      std::wstring msg =
+          L"Update available: " + latestTag +
+          L"\nCheck WAI Releases in GitHub(repository: ws-appinstaller)";
+      MessageBoxW(hWnd, msg.c_str(), L"Update Available", MB_ICONINFORMATION);
     }
+    DeleteFileW(tempFile.c_str());
+  }
 }
 
 // Global Variables:
@@ -598,1643 +727,1574 @@ BOOL InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK CardProc(HWND hWnd, UINT message, WPARAM wParam,
-    LPARAM lParam);
-void DownloadAndInstall(HWND hWnd, LPCWSTR url, LPCWSTR localPath);
+                          LPARAM lParam);
+void DownloadAndInstall(HWND hWnd, LPCWSTR url, LPCWSTR localPath,
+                        LPCWSTR appName, LPCWSTR version);
 void HideDragInstallUI(HWND hWnd);
 void CALLBACK LongPressTimerProc(HWND hWnd, UINT uMsg, UINT_PTR idEvent,
-    DWORD dwTime);
+                                 DWORD dwTime);
 LRESULT CALLBACK SidebarListProc(HWND hWnd, UINT message, WPARAM wParam,
-    LPARAM lParam);
+                                 LPARAM lParam);
+LRESULT CALLBACK ToastProc(HWND hWnd, UINT message, WPARAM wParam,
+                           LPARAM lParam);
+void ShowToast(HWND hOwner, LPCWSTR message, COLORREF color);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
-    _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine,
-    _In_ int nCmdShow) {
-    UNREFERENCED_PARAMETER(hPrevInstance);
-    UNREFERENCED_PARAMETER(lpCmdLine);
+                      _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine,
+                      _In_ int nCmdShow) {
+  UNREFERENCED_PARAMETER(hPrevInstance);
+  UNREFERENCED_PARAMETER(lpCmdLine);
 
-    // Initialize common controls (progress bar)
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_PROGRESS_CLASS };
-    InitCommonControlsEx(&icc);
+  // Initialize common controls (progress bar)
+  INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_PROGRESS_CLASS};
+  InitCommonControlsEx(&icc);
 
-    // Initialize global strings
-    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_WHENTHESAPPINSTALLER, szWindowClass,
-        MAX_LOADSTRING);
-    MyRegisterClass(hInstance);
+  // Initialize global strings
+  LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
+  LoadStringW(hInstance, IDC_WHENTHESAPPINSTALLER, szWindowClass,
+              MAX_LOADSTRING);
+  MyRegisterClass(hInstance);
 
-    // Register custom card class
-    WNDCLASSW wc = { 0 };
-    wc.lpfnWndProc = CardProc;
-    wc.hInstance = hInstance;
-    wc.lpszClassName = L"CardClass";
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 0);
-    RegisterClassW(&wc);
+  // Register custom card class
+  WNDCLASSW wc = {0};
+  wc.lpfnWndProc = CardProc;
+  wc.hInstance = hInstance;
+  wc.lpszClassName = L"CardClass";
+  wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 0);
+  RegisterClassW(&wc);
 
-    // Perform application initialization:
-    if (!InitInstance(hInstance, nCmdShow)) {
-        return FALSE;
+  // Register toast class
+  WNDCLASSW twc = {0};
+  twc.lpfnWndProc = ToastProc;
+  twc.hInstance = hInstance;
+  twc.lpszClassName = L"ToastClass";
+  twc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+  RegisterClassW(&twc);
+
+  // Perform application initialization:
+  if (!InitInstance(hInstance, nCmdShow)) {
+    return FALSE;
+  }
+
+  HACCEL hAccelTable =
+      LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WHENTHESAPPINSTALLER));
+
+  MSG msg;
+
+  // Main message loop:
+  while (GetMessage(&msg, nullptr, 0, 0)) {
+    if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg)) {
+      TranslateMessage(&msg);
+      DispatchMessage(&msg);
     }
+  }
 
-    HACCEL hAccelTable =
-        LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WHENTHESAPPINSTALLER));
-
-    MSG msg;
-
-    // Main message loop:
-    while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-    }
-
-    return (int)msg.wParam;
+  return (int)msg.wParam;
 }
 
 ATOM MyRegisterClass(HINSTANCE hInstance) {
-    WNDCLASSEXW wcex;
+  WNDCLASSEXW wcex;
 
-    wcex.cbSize = sizeof(WNDCLASSEX);
+  wcex.cbSize = sizeof(WNDCLASSEX);
 
-    wcex.style = CS_HREDRAW | CS_VREDRAW;
-    wcex.lpfnWndProc = WndProc;
-    wcex.cbClsExtra = 0;
-    wcex.cbWndExtra = 0;
-    wcex.hInstance = hInstance;
-    wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WHENTHESAPPINSTALLER));
-    wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wcex.lpszMenuName = nullptr; // remove menu bar (white topbar)
-    wcex.lpszClassName = szWindowClass;
-    wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
+  wcex.style = CS_HREDRAW | CS_VREDRAW;
+  wcex.lpfnWndProc = WndProc;
+  wcex.cbClsExtra = 0;
+  wcex.cbWndExtra = 0;
+  wcex.hInstance = hInstance;
+  wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WHENTHESAPPINSTALLER));
+  wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
+  wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+  wcex.lpszMenuName = nullptr; // remove menu bar (white topbar)
+  wcex.lpszClassName = szWindowClass;
+  wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
-    return RegisterClassExW(&wcex);
+  return RegisterClassExW(&wcex);
 }
 
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow) {
-    hInst = hInstance;
+  hInst = hInstance;
 
-    // Start with sidebar hidden, so base window width is 1200
-    HWND hWnd =
-        CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-            0, 1200, 700, nullptr, nullptr, hInstance, nullptr);
+  HDC hdcSystem = GetDC(NULL);
+  int dpi = GetDeviceCaps(hdcSystem, LOGPIXELSX);
+  ReleaseDC(NULL, hdcSystem);
 
-    if (!hWnd)
-        return FALSE;
+  // Start with sidebar hidden, so base window width is 1200
+  HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
+                            CW_USEDEFAULT, 0, Scale(1200, dpi), Scale(700, dpi),
+                            nullptr, nullptr, hInstance, nullptr);
 
-    ShowWindow(hWnd, nCmdShow);
-    UpdateWindow(hWnd);
+  if (!hWnd)
+    return FALSE;
 
-    // Check for updates after window is shown
-    CheckForUpdates(hWnd);
+  ShowWindow(hWnd, nCmdShow);
+  UpdateWindow(hWnd);
 
-    // Create a larger, bold font for the title
-    HFONT hTitleFont =
-        CreateFontW(32, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+  g_downloadLocation = GetDownloadsPath();
+  
+  // Start with sidebar hidden, so base window width is 1200
 
-    // Sidebar background panel (overlay)
-    hSidebar = CreateWindowW(
-        L"STATIC", nullptr, WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0,
-        SIDEBAR_W, 700, hWnd, (HMENU)ID_SIDEBAR, hInstance, nullptr);
-    // Subclass sidebar for custom paint and forwarding
-    OldSidebarProc =
-        (WNDPROC)SetWindowLongPtr(hSidebar, GWLP_WNDPROC, (LONG_PTR)SidebarProc);
+  // Create a larger, bold font for the title
+  HFONT hTitleFont =
+      CreateFontW(Scale(32, dpi), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
-    // Sidebar product list and About button as children of the sidebar window
-    hSidebarList = CreateWindowW(L"LISTBOX", nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
-        16, 50, SIDEBAR_W - 32, 560, hSidebar,
-        (HMENU)ID_SIDEBAR_LIST, hInstance, nullptr);
-    // Subclass the list for long-press detection
-    OldSidebarListProc = (WNDPROC)SetWindowLongPtr(hSidebarList, GWLP_WNDPROC,
-        (LONG_PTR)SidebarListProc);
+  // Sidebar removed
 
-    // Sidebar search edit (inside AppBar)
-    hSidebarSearchEdit = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        16, 12, SIDEBAR_W - 32, 28, hSidebar, (HMENU)ID_SIDEBAR_SEARCH_EDIT,
-        hInstance, nullptr);
+  int btnSize = Scale(40, dpi);
+  int iconBtnSize = Scale(40, dpi);
+  hSettingsBtn = CreateWindowW(
+      L"BUTTON", L"\x2699", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, iconBtnSize,
+      iconBtnSize, hWnd, (HMENU)ID_SETTINGS_BTN, hInstance, nullptr);
 
-    // About button at bottom of sidebar
-    RECT rcClient;
-    GetClientRect(hWnd, &rcClient);
-    hSidebarAbout =
-        CreateWindowW(L"BUTTON", L"About whenthe's app installer",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 16,
-            rcClient.bottom - 44, SIDEBAR_W - 32, 28, hSidebar,
-            (HMENU)ID_SIDEBAR_ABOUT_BTN, hInstance, nullptr);
+  hAboutCard =
+      CreateWindowW(L"CardClass", L"AboutCard", WS_CHILD | WS_CLIPSIBLINGS, 0,
+                    0, Scale(400, dpi), Scale(300, dpi), hWnd,
+                    (HMENU)ID_ABOUT_CARD, hInstance, nullptr);
+  // SetWindowLongPtr(hAboutCard, GWLP_USERDATA, (LONG_PTR)&aboutData); // Removed variable reference
 
-    // Main title and sidebar toggle next to it
-    hSidebarToggleBtn = CreateWindowW(
-        L"BUTTON", L"◨ ", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 12, 28, 28,
-        hWnd, (HMENU)ID_SIDEBAR_TOGGLE_BTN, hInstance, nullptr);
+  hMainTitle = CreateWindowW(
+      L"STATIC", L"Build. Improve. Develop. - WAI v2.10.8",
+      WS_CHILD | WS_VISIBLE, 60, 10, 700, 40, hWnd, (HMENU)5001, hInstance,
+      nullptr);
+  SendMessage(hMainTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
 
-    // (Top-level search removed; search exists in AppBar only)
+  hQueueBtn = CreateWindowW(
+      L"BUTTON", L"Q", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, iconBtnSize,
+      iconBtnSize, hWnd, (HMENU)ID_QUEUE_BTN, hInstance, nullptr);
 
-    hMainTitle =
-        CreateWindowW(L"STATIC", L"Welcome to WAI(whenthe's app installer)!",
-            WS_CHILD | WS_VISIBLE, 60, 10, 700, 40, hWnd, (HMENU)5001,
-            hInstance, nullptr);
-    SendMessage(hMainTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
+  hDownloadAllBtn =
+      CreateWindowW(L"BUTTON", L"Download All", WS_CHILD | BS_OWNERDRAW, 0, 0,
+                    Scale(150, dpi), Scale(40, dpi), hWnd,
+                    (HMENU)ID_DOWNLOAD_ALL_BTN, hInstance, nullptr);
 
-    const wchar_t* titles[6] = { L"CenterOS After Install Setup",
-                                L"visualOS HoverNet - PY Variant",
-                                L"Bugfinders",
-                                L"visualOS HoverNet - IE Variant",
-                                L"visualOS 1.2 OBT1",
-                                L"visualOS HoverNet" };
-    const wchar_t* descriptions[6] = {
-        L"The new OOBE for CenterOS V4.",
-        L"The Python variant of HoverNet, featuring PyQt6 and a new custom title "
-        L"bar.",
-        L"A game about finding actual system bugs and ancient/very old software. Mostly revolves around Windows. You might be able to find something like this in the About section...",
-        L"The IE variant of HoverNet, featuring an UI similiar to Internet "
-        L"Explorer.",
-        L"visualOS 1.2 Open Beta - Test 1\nThe 1st Open Beta test of visualOS "
-        L"1.2.",
-        L"A completely renewed browser, made to continue WB's legacy: HoverNet." };
-    const wchar_t* urls[6] = {
-        L"https://github.com/whenthe-washere/CenterOS-AfterInstallSetup/releases/"
-        L"download/preview3/ais-preview3.zip",
-        L"https://github.com/whenthe-washere/visualos-hovernet/releases/download/"
-        L"ver2.0.0-py/ver2-pyvariant.zip",
-        L"",
-        L"https://github.com/whenthe-washere/dev-releases/releases/download/"
-        L"ver2.0.0-ie/vOS-HoverNet.zip",
-        L"https://sites.google.com/view/ws-centerosinst/ready-to-switch",
-        L"" };
+  hBackBtn = CreateWindowW(L"BUTTON", L"\x2190", WS_CHILD | BS_OWNERDRAW,
+                           0, 0, Scale(100, dpi), Scale(40, dpi), hWnd,
+                           (HMENU)ID_BACK_TO_APPS_BTN, hInstance, nullptr);
 
-    // Load icons for cards from resources
-    hCardIcons[0] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(AIS_ICON),
-        IMAGE_ICON, 32, 32, 0);
-    hCardIcons[1] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(HNPY_ICON),
-        IMAGE_ICON, 32, 32, 0);
-    hCardIcons[2] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(BUGFINDERS_ICON),
-        IMAGE_ICON, 32, 32, 0);
-    hCardIcons[3] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(HNDEV_ICON),
-        IMAGE_ICON, 32, 32, 0);
-    hCardIcons[4] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(VISUALOS_ICON),
-        IMAGE_ICON, 32, 32, 0);
-    hCardIcons[5] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(HN_ICON),
-        IMAGE_ICON, 32, 32, 0);
+  hSetPathEdit = CreateWindowW(L"EDIT", g_downloadLocation.c_str(),
+                               WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0, 0, 0, 0,
+                               hWnd, (HMENU)ID_SET_PATH_EDIT, hInstance, nullptr);
+  hSetBrowseBtn = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD, 0, 0, 0, 0,
+                                hWnd, (HMENU)ID_SET_BROWSE, hInstance, nullptr);
 
-    // Sample and cache average color from each icon
-    for (int i = 0; i < 6; i++)
-        g_cardAvgColor[i] = SampleIconAvgColor(hCardIcons[i]);
+  const wchar_t *titles[6] = {L"CenterOS After Install Setup",
+                              L"visualOS HoverNet - PY Variant",
+                              L"Bugfinders",
+                              L"visualOS HoverNet - IE Variant",
+                              L"visualOS 1.2 OBT1",
+                              L"visualOS HoverNet"};
+  const wchar_t *descriptions[6] = {
+      L"The new OOBE for CenterOS V4.",
+      L"The Python variant of HoverNet, featuring PyQt6 and a new custom title "
+      L"bar.",
+      L"A game about finding actual system bugs and ancient/very old software. "
+      L"Mostly revolves around Windows. You might be able to find something "
+      L"like this in the About section...",
+      L"The IE variant of HoverNet, featuring an UI similiar to Internet "
+      L"Explorer.",
+      L"visualOS 1.2 Open Beta - Test 1\nThe 1st Open Beta test of visualOS "
+      L"1.2.",
+      L"A completely renewed browser, made to continue WB's legacy: HoverNet."};
+  const wchar_t *versions[6] = {L"v2.0.0", L"v2.0.1", L"v1.0.0",
+                                L"v2.0.0", L"v1.2.0", L"v2.1.0"};
+  const wchar_t *urls[6] = {
+      L"https://github.com/whenthe-washere/CenterOS-AfterInstallSetup/releases/"
+      L"download/preview3/ais-preview3.zip",
+      L"https://github.com/whenthe-washere/visualos-hovernet/releases/download/"
+      L"ver2.0.0-py/ver2-pyvariant.zip",
+      L"",
+      L"https://github.com/whenthe-washere/dev-releases/releases/download/"
+      L"ver2.0.0-ie/vOS-HoverNet.zip",
+      L"https://sites.google.com/view/ws-centerosinst/ready-to-switch",
+      L""};
 
-    const int numCards = 6;
+  // Load icons for cards from resources
+  hCardIcons[0] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(AIS_ICON),
+                                    IMAGE_ICON, 32, 32, 0);
+  hCardIcons[1] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(HNPY_ICON),
+                                    IMAGE_ICON, 32, 32, 0);
+  hCardIcons[2] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(BUGFINDERS_ICON),
+                                    IMAGE_ICON, 32, 32, 0);
+  hCardIcons[3] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(HNDEV_ICON),
+                                    IMAGE_ICON, 32, 32, 0);
+  hCardIcons[4] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(VISUALOS_ICON),
+                                    IMAGE_ICON, 32, 32, 0);
+  hCardIcons[5] = (HICON)LoadImageW(hInstance, MAKEINTRESOURCE(HN_ICON),
+                                    IMAGE_ICON, 32, 32, 0);
 
-    // Populate sidebar list with titles (copy)
-    for (int i = 0; i < numCards; ++i) {
-        SendMessageW(hSidebarList, LB_ADDSTRING, 0, (LPARAM)titles[i]);
-    }
+  // Sample and cache average color from each icon
+  for (int i = 0; i < 6; i++)
+    g_cardAvgColor[i] = SampleIconAvgColor(hCardIcons[i]);
 
-    // Create cards (initial position will be set by UpdateLayout)
-    for (int i = 0; i < numCards; ++i) {
-        HWND hCard =
-            CreateWindowW(L"CardClass", nullptr, WS_CHILD | WS_VISIBLE, 0, 0,
-                CARD_WIDTH, CARD_HEIGHT, hWnd,
-                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(2001 + i)),
-                hInstance, nullptr);
+  const int numCards = 6;
 
-        CardData* data = new CardData();
-        wcsncpy_s(data->title, titles[i], _TRUNCATE);
-        wcsncpy_s(data->description, descriptions[i], _TRUNCATE);
-        wcsncpy_s(data->url, urls[i], _TRUNCATE);
-        SetWindowLongPtr(hCard, GWLP_USERDATA, (LONG_PTR)data);
+  // populate sidebar removed
 
-        HWND hButton = GetDlgItem(hCard, CARD_BUTTON_ID);
-        if (hButton) {
-            if (wcslen(data->url) == 0) {
-                SetWindowTextW(hButton, L"Not available");
-                EnableWindow(hButton, FALSE);
-            }
-            else {
-                // Decide label based on whether URL looks like a downloadable asset
-                if (IsDownloadableUrl(data->url)) {
-                    SetWindowTextW(hButton, L"Download and Install");
-                }
-                else {
-                    SetWindowTextW(hButton, L"Open Website");
-                }
-                EnableWindow(hButton, TRUE);
-            }
+  // Create cards (initial position will be set by UpdateLayout)
+  for (int i = 0; i < numCards; ++i) {
+    HWND hCard = CreateWindowW(
+        L"CardClass", nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0,
+        CARD_WIDTH, CARD_HEIGHT, hWnd,
+        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(2001 + i)), hInstance,
+        nullptr);
+
+    CardData *data = new CardData();
+    wcsncpy_s(data->title, titles[i], _TRUNCATE);
+    wcsncpy_s(data->description, descriptions[i], _TRUNCATE);
+    wcsncpy_s(data->url, urls[i], _TRUNCATE);
+    wcsncpy_s(data->version, versions[i], _TRUNCATE);
+    SetWindowLongPtr(hCard, GWLP_USERDATA, (LONG_PTR)data);
+
+    HWND hButton = GetDlgItem(hCard, CARD_BUTTON_ID);
+    if (hButton) {
+      if (wcslen(data->url) == 0) {
+        SetWindowTextW(hButton, L"Not available");
+        EnableWindow(hButton, FALSE);
+      } else {
+        // Decide label based on whether URL looks like a downloadable asset
+        if (IsDownloadableUrl(data->url)) {
+          SetWindowTextW(hButton, L"Download and Install");
+        } else {
+          SetWindowTextW(hButton, L"Open Website");
         }
+        EnableWindow(hButton, TRUE);
+      }
     }
+  }
 
-    // Right panel with rounded corners
-    hRightPanel =
-        CreateWindowW(L"STATIC", nullptr,
-            WS_CHILD | WS_VISIBLE |
-            SS_OWNERDRAW, // Add SS_OWNERDRAW for custom painting
-            900, 0, 300, 700, hWnd, (HMENU)3001, hInstance, nullptr);
+  // Easter Egg Controls (Hidden initially)
+  hEENotice = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_LEFT, 0, 0, 0, 0,
+                            hWnd, (HMENU)ID_EE_NOTICE, hInstance, nullptr);
+  hEEText1 = CreateWindowW(L"STATIC", L"whenthe's app installer by WS",
+                           WS_CHILD | SS_NOTIFY | SS_LEFT, 0, 0, 0, 0, hWnd,
+                           (HMENU)ID_EE_TEXT1, hInstance, nullptr);
+  hEEText2 =
+      CreateWindowW(L"STATIC", L"v2.00.6", WS_CHILD | SS_NOTIFY | SS_LEFT, 0, 0,
+                    0, 0, hWnd, (HMENU)ID_EE_TEXT2, hInstance, nullptr);
+  hEERest = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_LEFT, 0, 0, 0, 0, hWnd,
+                          (HMENU)ID_EE_REST, hInstance, nullptr);
 
-    // Details: Icon
-    hDetailsIcon =
-        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_ICON, 920, 20, 1,
-            32, hWnd, (HMENU)ID_DETAILS_ICON, hInstance, nullptr);
-    // Details: Title
-    hDetailsTitle =
-        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 920, 20, 220, 24,
-            hWnd, (HMENU)ID_DETAILS_TITLE, hInstance, nullptr);
-    // Details: Description
-    hDetailsDesc =
-        CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 920, 60, 260, 120,
-            hWnd, (HMENU)ID_DETAILS_DESC, hInstance, nullptr);
+  // Fonts
+  hFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
-    // Easter Egg Controls (Hidden initially)
-    hEENotice = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_LEFT, 0, 0, 0, 0,
-        hWnd, (HMENU)ID_EE_NOTICE, hInstance, nullptr);
-    hEEText1 = CreateWindowW(L"STATIC", L"whenthe's app installer by WS",
-        WS_CHILD | SS_NOTIFY | SS_LEFT, 0, 0, 0, 0, hWnd,
-        (HMENU)ID_EE_TEXT1, hInstance, nullptr);
-    hEEText2 = CreateWindowW(L"STATIC", L"v2.00.6",
-        WS_CHILD | SS_NOTIFY | SS_LEFT, 0, 0, 0, 0, hWnd,
-        (HMENU)ID_EE_TEXT2, hInstance, nullptr);
-    hEERest = CreateWindowW(L"STATIC", L"", WS_CHILD | SS_LEFT, 0, 0, 0, 0, hWnd,
-        (HMENU)ID_EE_REST, hInstance, nullptr);
+  SendMessage(hSettingsBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
+  SendMessage(hAboutCard, WM_SETFONT, (WPARAM)hFont, TRUE);
+  SendMessage(hSetPathEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+  SendMessage(hSetBrowseBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    // Fonts
-    hFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hTitleFont2 =
-        CreateFontW(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+  // Apply font to Easter Egg controls
+  SendMessage(hEENotice, WM_SETFONT, (WPARAM)hFont, TRUE);
+  SendMessage(hEEText1, WM_SETFONT, (WPARAM)hFont, TRUE);
+  SendMessage(hEEText2, WM_SETFONT, (WPARAM)hFont, TRUE);
+  SendMessage(hEERest, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-    SendMessage(hDetailsTitle, WM_SETFONT, (WPARAM)hTitleFont2, TRUE);
-    SendMessage(hDetailsDesc, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hDetailsInstallBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hSidebarList, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hSidebarAbout, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hSidebarToggleBtn, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hSidebarSearchEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+  // Initial responsive layout
+  UpdateLayout(hWnd);
 
-    // Apply font to Easter Egg controls
-    SendMessage(hEENotice, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hEEText1, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hEEText2, WM_SETFONT, (WPARAM)hFont, TRUE);
-    SendMessage(hEERest, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-    // Cue banner for AppBar search
-    SendMessageW(hSidebarSearchEdit, 0x1501 /* EM_SETCUEBANNER */, FALSE,
-        (LPARAM)L"");
-
-    // Status and progress under details
-    hStatusLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 920, 240,
-        240, 20, hWnd, (HMENU)2002, hInstance, nullptr);
-    SendMessage(hStatusLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
-    ShowWindow(hStatusLabel, SW_HIDE);
-
-    hProgressBar = CreateWindowExW(
-        0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_MARQUEE, 920,
-        265, 240, 18, hWnd, (HMENU)2003, hInstance, nullptr);
-    SendMessage(hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-    ShowWindow(hProgressBar, SW_HIDE);
-
-    // Ensure sidebar overlays other content and starts hidden
-    SetWindowPos(hSidebar, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-    ShowWindow(hSidebar, g_sidebarVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(hSidebarList, g_sidebarVisible ? SW_SHOW : SW_HIDE);
-    ShowWindow(hSidebarAbout, g_sidebarVisible ? SW_SHOW : SW_HIDE);
-
-    // Initial responsive layout
-    UpdateLayout(hWnd);
-
-    return TRUE;
+  return TRUE;
 }
 
 //
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE: Processes messages for the main window.
-//
-//  WM_COMMAND  - process the application menu
-//  WM_PAINT    - Paint the main window
-//  WM_DESTROY  - post a quit message and return
-//
-//
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
-    LPARAM lParam) {
-    switch (message) {
-    case WM_SIZE:
-        g_isResizingEvent = true;
-        // clamp scroll offset on resize
-        {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            int viewportHeight = rc.bottom - rc.top;
-            int maxOffset = max(0, g_contentHeight - viewportHeight);
-            if (g_scrollOffsetY > maxOffset)
-                g_scrollOffsetY = maxOffset;
+                         LPARAM lParam) {
+  switch (message) {
+  case WM_SIZE:
+    g_isResizingEvent = true;
+    // clamp scroll offset on resize
+    {
+      RECT rc;
+      GetClientRect(hWnd, &rc);
+      int viewportHeight = rc.bottom - rc.top;
+      int maxOffset = max(0, g_contentHeight - viewportHeight);
+      if (g_scrollOffsetY > maxOffset)
+        g_scrollOffsetY = maxOffset;
+    }
+    UpdateLayout(hWnd);
+    g_isResizingEvent = false;
+    break;
+  case WM_COMMAND: {
+    int wmId = LOWORD(wParam);
+    int notify = HIWORD(wParam);
+    
+    if (wmId == ID_SET_BROWSE) {
+        wchar_t path[MAX_PATH];
+        BROWSEINFOW bi = { 0 };
+        bi.lpszTitle = L"Select Download Folder";
+        LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+        if (pidl != 0) {
+            SHGetPathFromIDListW(pidl, path);
+            g_downloadLocation = path;
+            SetWindowTextW(hSetPathEdit, path);
+            CoTaskMemFree(pidl);
         }
-        UpdateLayout(hWnd);
-        g_isResizingEvent = false;
-        break;
-    case WM_COMMAND: {
-        int wmId = LOWORD(wParam);
-        int notify = HIWORD(wParam);
-        if (wmId == ID_SIDEBAR_TOGGLE_BTN && notify == BN_CLICKED) {
-            g_sidebarVisible = !g_sidebarVisible;
-
-            // Show/hide sidebar and its children only (do not resize the window)
-            ShowWindow(hSidebar, g_sidebarVisible ? SW_SHOW : SW_HIDE);
-            ShowWindow(hSidebarList, g_sidebarVisible ? SW_SHOW : SW_HIDE);
-            ShowWindow(hSidebarAbout, g_sidebarVisible ? SW_SHOW : SW_HIDE);
-            // Keep AppBar on top of content
-            if (g_sidebarVisible) {
-                SetWindowPos(hSidebar, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            }
-
-            // Update layout
-            UpdateLayout(hWnd);
-            return 0;
-        }
-        if (wmId == ID_SIDEBAR_ABOUT_BTN && notify == BN_CLICKED) {
-            // Show About content in the InfoBar instead of a dialog
-            const wchar_t* aboutTitle = L"About WAI";
-            const wchar_t* aboutDesc =
-                L"-------------------------------------------\n"
-                L"Release Notes:\n"
-                L"Updated apps\n"
-                L"Removed the notice text\n"
-                L"Added colormix to the backgrounds of cards"
-                L"Updated icons";
-
-            HICON hAppIcon =
-                LoadIcon(hInst, MAKEINTRESOURCE(IDI_WHENTHESAPPINSTALLER));
-            g_selected = { 0 };
-            wcsncpy_s(g_selected.title, aboutTitle, _TRUNCATE);
-            g_selected.url[0] = L'\0';
-            g_selectedIcon = hAppIcon;
-            if (hDetailsIcon)
-                SendMessage(hDetailsIcon, STM_SETICON, (WPARAM)g_selectedIcon, 0);
-            if (hDetailsTitle)
-                SetWindowTextW(hDetailsTitle, aboutTitle);
-            if (hDetailsDesc)
-                SetWindowTextW(hDetailsDesc, aboutDesc);
-
-            // Show desc, hide EE controls except the interactive text lines
-            ShowWindow(hDetailsDesc, SW_SHOW);
-            ShowWindow(hEENotice, SW_HIDE);
-            ShowWindow(hEEText1, SW_SHOW);
-            ShowWindow(hEEText2, SW_SHOW);
-            ShowWindow(hEERest, SW_SHOW);
-
-            eeStage = 0; // Reset stage
-
-            UpdateLayout(hWnd);
-            if (hDetailsInstallBtn) {
-                EnableWindow(hDetailsInstallBtn, FALSE);
-                SetWindowTextW(hDetailsInstallBtn, L"Not available");
-            }
-            return 0;
-        }
-        // Check for Easter Egg interactions
-        if (wmId == ID_EE_TEXT1 && notify == STN_CLICKED) {
-            // Change color
-            eeColor1 = RGB(rand() % 256, rand() % 256, rand() % 256);
-            InvalidateRect(hEEText1, NULL, TRUE);
-            UpdateWindow(hEEText1);
-
-            // Sequence Logic: T1 -> T2 -> T1 -> T2
-            if (eeStage == 0)
-                eeStage = 1;
-            else if (eeStage == 2)
-                eeStage = 3;
-            else
-                eeStage = 1; // Restart loop if clicked out of order (or just clicked T1
-            // again)
-            return 0;
-        }
-        if (wmId == ID_EE_TEXT2 && notify == STN_CLICKED) {
-            // Change color
-            eeColor2 = RGB(rand() % 256, rand() % 256, rand() % 256);
-            InvalidateRect(hEEText2, NULL, TRUE);
-            UpdateWindow(hEEText2);
-
-            if (eeStage == 1)
-                eeStage = 2;
-            else if (eeStage == 3) {
-                eeStage = 4;
-                StartSpaceShooter(hInst);
-                eeStage = 0;
-            }
-            else {
-                eeStage = 0;
-            }
-            return 0;
-        }
-        // Search toggle
-        // (Top-level search toggle removed)
-        // Search text change from AppBar search filters cards and list
-        if (notify == EN_CHANGE && wmId == ID_SIDEBAR_SEARCH_EDIT) {
-            wchar_t query[256] = { 0 };
-            GetWindowTextW(hSidebarSearchEdit, query, 256);
-            std::wstring q = query;
-            for (auto& ch : q)
-                ch = (wchar_t)towlower(ch);
-            const int numCards = 6;
-            // Filter cards
-            for (int i = 0; i < numCards; ++i) {
-                HWND hCard = GetDlgItem(hWnd, 2001 + i);
-                if (!hCard)
-                    continue;
-                CardData* data = (CardData*)GetWindowLongPtr(hCard, GWLP_USERDATA);
-                if (!data)
-                    continue;
-                std::wstring title = data->title;
-                std::wstring desc = data->description;
-                for (auto& ch : title)
-                    ch = (wchar_t)towlower(ch);
-                for (auto& ch : desc)
-                    ch = (wchar_t)towlower(ch);
-                bool match = q.empty() || title.find(q) != std::wstring::npos ||
-                    desc.find(q) != std::wstring::npos;
-                ShowWindow(hCard, match ? SW_SHOW : SW_HIDE);
-            }
-            // Filter sidebar list by rebuilding (include About)
-            SendMessageW(hSidebarList, LB_RESETCONTENT, 0, 0);
-            const wchar_t* titlesLocal[7] = { L"CenterOS After Install Setup",
-                                             L"visualOS HoverNet - PY Variant",
-                                             L"Bugfinders",
-                                             L"visualOS HoverNet - IE Variant",
-                                             L"visualOS 1.2 OBT1",
-                                             L"visualOS HoverNet",
-                                             L"About WAI(No value)" };
-            for (int i = 0; i < 7; ++i) {
-                std::wstring t = titlesLocal[i];
-                for (auto& ch : t)
-                    ch = (wchar_t)towlower(ch);
-                if (q.empty() || t.find(q) != std::wstring::npos) {
-                    SendMessageW(hSidebarList, LB_ADDSTRING, 0, (LPARAM)titlesLocal[i]);
-                }
-            }
-            RefreshUI(hWnd);
-            return 0;
-        }
-        // Sidebar list selection updates details pane
-        if (wmId == ID_SIDEBAR_LIST && notify == LBN_SELCHANGE) {
-            int sel = (int)SendMessageW(hSidebarList, LB_GETCURSEL, 0, 0);
-            if (sel != LB_ERR) {
-                wchar_t buffer[128] = { 0 };
-                SendMessageW(hSidebarList, LB_GETTEXT, sel, (LPARAM)buffer);
-                // Find matching card by title
-                for (int i = 0; i < 6; ++i) {
-                    HWND hCard = GetDlgItem(hWnd, 2001 + i);
-                    if (!hCard)
-                        continue;
-                    CardData* d = (CardData*)GetWindowLongPtr(hCard, GWLP_USERDATA);
-                    if (d && wcscmp(d->title, buffer) == 0) {
-                        g_selected = *d;
-                        int cardIndex = i;
-                        if (cardIndex >= 0 && cardIndex < 6 && hCardIcons[cardIndex]) {
-                            g_selectedIcon = hCardIcons[cardIndex];
-                            SendMessage(hDetailsIcon, STM_SETICON, (WPARAM)g_selectedIcon, 0);
-                        }
-                        SetWindowTextW(hDetailsTitle, g_selected.title);
-                        SetWindowTextW(hDetailsDesc, g_selected.description);
-
-                        // Ensure standard description is shown and EE hidden
-                        ShowWindow(hDetailsDesc, SW_SHOW);
-                        eeStage = 0;
-                        ShowWindow(hEENotice, SW_HIDE);
-                        ShowWindow(hEEText1, SW_HIDE);
-                        ShowWindow(hEEText2, SW_HIDE);
-                        ShowWindow(hEERest, SW_HIDE);
-
-                        if (hDetailsInstallBtn) {
-                            if (wcslen(g_selected.url) == 0) {
-                                SetWindowTextW(hDetailsInstallBtn, L"Not available");
-                                EnableWindow(hDetailsInstallBtn, FALSE);
-                            }
-                            else if (IsDownloadableUrl(g_selected.url)) {
-                                SetWindowTextW(hDetailsInstallBtn, L"Download and Install");
-                                EnableWindow(hDetailsInstallBtn, TRUE);
-                            }
-                            else {
-                                SetWindowTextW(hDetailsInstallBtn, L"Open Website");
-                                EnableWindow(hDetailsInstallBtn, TRUE);
-                            }
-                        }
-                        UpdateLayout(hWnd);
-                        break;
-                    }
-                }
-            }
-            return 0;
-        }
-        // Details button click
-        if (wmId == ID_DETAILS_BTN && notify == BN_CLICKED) {
-            if (wcslen(g_selected.url) > 0) {
-                // If URL is a downloadable asset, perform download; otherwise open in
-                // default browser
-                if (IsDownloadableUrl(g_selected.url)) {
-                    std::wstring downloadsPath = GetDownloadsPath();
-                    std::wstring fileName = GetFileNameFromUrl(g_selected.url);
-                    std::wstring fullPath = downloadsPath + L"\\" + fileName;
-                    DownloadAndInstall(hWnd, g_selected.url, fullPath.c_str());
-                }
-                else {
-                    ShellExecuteW(nullptr, L"open", g_selected.url, nullptr, nullptr,
-                        SW_SHOWNORMAL);
-                }
-            }
-            else {
-                SetWindowTextW(hStatusLabel, L"No link.");
-                ShowWindow(hStatusLabel, SW_SHOW);
-            }
-            return 0;
-        }
-        // Parse the menu selections (menu removed)
-        switch (wmId) {
-        case IDM_EXIT:
-            DestroyWindow(hWnd);
-            break;
-        default:
-            return DefWindowProc(hWnd, message, wParam, lParam);
-        }
-    } break;
-    case WM_MOUSEWHEEL: {
-        int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-        int step = 60; // pixels per wheel notch
-        g_scrollOffsetY -= (delta / WHEEL_DELTA) * step;
-        // clamp
-        {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            int viewportHeight = rc.bottom - rc.top;
-            int maxOffset = max(0, g_contentHeight - viewportHeight);
-            if (g_scrollOffsetY < 0)
-                g_scrollOffsetY = 0;
-            if (g_scrollOffsetY > maxOffset)
-                g_scrollOffsetY = maxOffset;
-        }
+        return 0;
+    }
+    if (wmId == ID_SETTINGS_BTN) {
+        g_viewMode = VIEW_SETTINGS;
+        g_scrollOffsetY = 0;
         UpdateLayout(hWnd);
         return 0;
     }
-    case WM_VSCROLL: {
-        SCROLLINFO si{};
-        si.cbSize = sizeof(si);
-        si.fMask = SIF_ALL;
-        GetScrollInfo(hWnd, SB_VERT, &si);
-        int pos = si.nPos;
-        switch (LOWORD(wParam)) {
-        case SB_LINEUP:
-            pos -= 30;
-            break;
-        case SB_LINEDOWN:
-            pos += 30;
-            break;
-        case SB_PAGEUP:
-            pos -= (int)si.nPage;
-            break;
-        case SB_PAGEDOWN:
-            pos += (int)si.nPage;
-            break;
-        case SB_THUMBTRACK:
-            pos = si.nTrackPos;
-            break;
-        default:
-            break;
-        }
-        // clamp and apply
-        {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            int viewportHeight = rc.bottom - rc.top;
-            int maxOffset = max(0, g_contentHeight - viewportHeight);
-            if (pos < 0)
-                pos = 0;
-            if (pos > maxOffset)
-                pos = maxOffset;
-        }
-        g_scrollOffsetY = pos;
-        UpdateLayout(hWnd);
-        return 0;
-    }
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
 
-        RECT rc;
-        GetClientRect(hWnd, &rc);
-        FillRect(hdc, &rc, hMainBgBrush);
+    if (wmId == ID_QUEUE_BTN) {
+      g_viewMode = VIEW_QUEUE;
+      g_scrollOffsetY = 0;
+      UpdateLayout(hWnd);
+      return 0;
+    } else if (wmId == ID_BACK_TO_APPS_BTN) {
+      g_viewMode = VIEW_APPS;
+      g_scrollOffsetY = 0;
+      UpdateLayout(hWnd);
+      return 0;
+    } else if (wmId == ID_DOWNLOAD_ALL_BTN) {
+      for (int idx : g_downloadQueue) {
+        HWND hCard = GetDlgItem(hWnd, 2001 + idx);
+        CardData *data = (CardData *)GetWindowLongPtr(hCard, GWLP_USERDATA);
+        if (data) {
+          std::wstring downloadsPath = GetDownloadsPath();
+          std::wstring fileName = GetFileNameFromUrl(data->url);
+          std::wstring fullPath = downloadsPath + L"\\" + fileName;
+          DownloadAndInstall(hWnd, data->url, fullPath.c_str(), data->title,
+                             data->version);
+        }
+      }
+      g_downloadQueue.clear();
+      UpdateLayout(hWnd);
+      return 0;
+    }
 
-        EndPaint(hWnd, &ps);
-    } break;
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_CTLCOLORSTATIC: {
-        HWND hStatic = (HWND)lParam;
-        int ctrlId = GetDlgCtrlID(hStatic);
-        if (ctrlId == 3001) {
-            SetBkColor((HDC)wParam, RGB(30, 30, 60));
-            SetTextColor((HDC)wParam, RGB(220, 220, 220));
-            static HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 60));
-            return (INT_PTR)hBrush;
-        }
-        if (ctrlId == ID_SIDEBAR) {
-            SetBkColor((HDC)wParam, RGB(30, 30, 60));
-            SetTextColor((HDC)wParam, RGB(220, 220, 220));
-            static HBRUSH hBrushSidebar = CreateSolidBrush(RGB(30, 30, 60));
-            return (INT_PTR)hBrushSidebar;
-        }
-        // Main title on main background: make background transparent so it blends
-        if (ctrlId == 5001) {
-            SetBkMode((HDC)wParam, TRANSPARENT);
-            SetTextColor((HDC)wParam, RGB(220, 220, 220));
-            return (INT_PTR)GetStockObject(HOLLOW_BRUSH);
-        }
-        // Details area (icon + labels) should match InfoBar background color
-        if (ctrlId == ID_DETAILS_TITLE || ctrlId == ID_DETAILS_DESC ||
-            ctrlId == ID_DETAILS_ICON) {
-            SetBkColor((HDC)wParam, RGB(30, 30, 60));
-            SetTextColor((HDC)wParam, RGB(220, 220, 220));
-            static HBRUSH hRightBrush = CreateSolidBrush(RGB(30, 30, 60));
-            return (INT_PTR)hRightBrush;
-        }
-        // Easter Egg text colors
-        if (ctrlId == ID_EE_TEXT1) {
-            SetBkColor((HDC)wParam, RGB(30, 30, 60));
-            SetTextColor((HDC)wParam, eeColor1);
-            static HBRUSH hBrushEE = CreateSolidBrush(RGB(30, 30, 60));
-            return (INT_PTR)hBrushEE;
-        }
-        if (ctrlId == ID_EE_TEXT2) {
-            SetBkColor((HDC)wParam, RGB(30, 30, 60));
-            SetTextColor((HDC)wParam, eeColor2);
-            static HBRUSH hBrushEE = CreateSolidBrush(RGB(30, 30, 60));
-            return (INT_PTR)hBrushEE;
-        }
-        if (ctrlId == ID_EE_NOTICE || ctrlId == ID_EE_REST) {
-            SetBkColor((HDC)wParam, RGB(30, 30, 60));
-            SetTextColor((HDC)wParam, RGB(220, 220, 220));
-            static HBRUSH hBrushEE = CreateSolidBrush(RGB(30, 30, 60));
-            return (INT_PTR)hBrushEE;
-        }
-        SetBkColor((HDC)wParam, RGB(30, 30, 60));
-        SetTextColor((HDC)wParam, RGB(220, 220, 220));
-        return (INT_PTR)hMainBgBrush;
-    }
-    case WM_CTLCOLORLISTBOX: {
-        HDC hdc = (HDC)wParam;
-        SetBkColor(hdc, RGB(30, 30, 60));
-        SetTextColor(hdc, RGB(220, 220, 220));
-        static HBRUSH hListBrush = CreateSolidBrush(RGB(30, 30, 60));
-        return (INT_PTR)hListBrush;
-    }
-    case WM_CTLCOLOREDIT: {
-        HDC hdcEdit = (HDC)wParam;
-        SetBkColor(hdcEdit, RGB(30, 30, 60));
-        SetTextColor(hdcEdit, RGB(220, 220, 220));
-        static HBRUSH hEditBrush = CreateSolidBrush(RGB(30, 30, 60));
-        return (INT_PTR)hEditBrush;
-    }
-    case WM_SYSCOLORCHANGE:
-        DrawMenuBar(hWnd);
-        break;
-    case WM_DESTROY:
-        for (int i = 0; i < 6; ++i) {
-            if (hCardIcons[i])
-                DestroyIcon(hCardIcons[i]);
-        }
-        if (g_selectedIcon)
-            DestroyIcon(g_selectedIcon);
-        PostQuitMessage(0);
-        break;
-    case WM_DRAWITEM: {
-        LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
-        if (pDIS->CtlID == 3001) // Right panel
-        {
-            // Create rounded rectangle background
-            HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 60));
-            SelectObject(pDIS->hDC, hBrush);
-            RoundRect(pDIS->hDC, pDIS->rcItem.left, pDIS->rcItem.top,
-                pDIS->rcItem.right, pDIS->rcItem.bottom, 20, 20);
-            DeleteObject(hBrush);
-
-            // Draw border
-            HPEN hBorderPen = CreatePen(PS_SOLID, 1, RGB(40, 40, 70));
-            HPEN hOldPen = (HPEN)SelectObject(pDIS->hDC, hBorderPen);
-            HBRUSH hOldBrush =
-                (HBRUSH)SelectObject(pDIS->hDC, GetStockObject(NULL_BRUSH));
-            RoundRect(pDIS->hDC, pDIS->rcItem.left, pDIS->rcItem.top,
-                pDIS->rcItem.right, pDIS->rcItem.bottom, 20, 20);
-            SelectObject(pDIS->hDC, hOldPen);
-            SelectObject(pDIS->hDC, hOldBrush);
-            DeleteObject(hBorderPen);
-
-            return TRUE;
-        }
-        return FALSE;
-    }
+    // Parse the menu selections (menu removed)
+    switch (wmId) {
+    case IDM_EXIT:
+      DestroyWindow(hWnd);
+      break;
     default:
-        return DefWindowProc(hWnd, message, wParam, lParam);
+      return DefWindowProc(hWnd, message, wParam, lParam);
     }
+  } break;
+  case WM_MOUSEWHEEL: {
+    int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+    int step = 60; // pixels per wheel notch
+    g_scrollOffsetY -= (delta / WHEEL_DELTA) * step;
+    // clamp
+    {
+      RECT rc;
+      GetClientRect(hWnd, &rc);
+      int viewportHeight = rc.bottom - rc.top;
+      int maxOffset = max(0, g_contentHeight - viewportHeight);
+      if (g_scrollOffsetY < 0)
+        g_scrollOffsetY = 0;
+      if (g_scrollOffsetY > maxOffset)
+        g_scrollOffsetY = maxOffset;
+    }
+    UpdateLayout(hWnd);
     return 0;
+  }
+  case WM_VSCROLL: {
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    GetScrollInfo(hWnd, SB_VERT, &si);
+    int pos = si.nPos;
+    switch (LOWORD(wParam)) {
+    case SB_LINEUP:
+      pos -= 30;
+      break;
+    case SB_LINEDOWN:
+      pos += 30;
+      break;
+    case SB_PAGEUP:
+      pos -= (int)si.nPage;
+      break;
+    case SB_PAGEDOWN:
+      pos += (int)si.nPage;
+      break;
+    case SB_THUMBTRACK:
+      pos = si.nTrackPos;
+      break;
+    default:
+      break;
+    }
+    // clamp and apply
+    {
+      RECT rc;
+      GetClientRect(hWnd, &rc);
+      int viewportHeight = rc.bottom - rc.top;
+      int maxOffset = max(0, g_contentHeight - viewportHeight);
+      if (pos < 0)
+        pos = 0;
+      if (pos > maxOffset)
+        pos = maxOffset;
+    }
+    g_scrollOffsetY = pos;
+    UpdateLayout(hWnd);
+    return 0;
+  }
+  case WM_LBUTTONDOWN: {
+    if (g_viewMode == VIEW_QUEUE) {
+      int dpi = GetDPI(hWnd);
+      int startY = Scale(80, dpi) - g_scrollOffsetY;
+      POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+      RECT rc;
+      GetClientRect(hWnd, &rc);
+      for (size_t i = 0; i < g_downloadQueue.size(); i++) {
+        RECT xRect = {rc.right - Scale(70, dpi), startY,
+                      rc.right - Scale(20, dpi), startY + Scale(50, dpi)};
+        if (PtInRect(&xRect, pt)) {
+          g_downloadQueue.erase(g_downloadQueue.begin() + i);
+          UpdateLayout(hWnd);
+          return 0;
+        }
+        startY += Scale(60, dpi);
+      }
+    }
+    if (g_viewMode == VIEW_SETTINGS) {
+        int dpi = GetDPI(hWnd);
+        POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        int lm = Scale(28, dpi);
+        int btnW = Scale(110, dpi), btnH = Scale(36, dpi), btnGap = Scale(10, dpi);
+        // Theme buttons Y: 16 + 46 + 14 + 22 = 98
+        int themeY = Scale(98, dpi);
+        RECT rL = {lm + 0*(btnW+btnGap), themeY, lm + 0*(btnW+btnGap) + btnW, themeY + btnH};
+        RECT rD = {lm + 1*(btnW+btnGap), themeY, lm + 1*(btnW+btnGap) + btnW, themeY + btnH};
+        RECT rA = {lm + 2*(btnW+btnGap), themeY, lm + 2*(btnW+btnGap) + btnW, themeY + btnH};
+        // +/- Y: 98 + 36 + 18 = 152
+        int szY = Scale(152, dpi);
+        int badgeW = Scale(50, dpi);
+        RECT rP = {lm + Scale(110,dpi) + badgeW + Scale(8,dpi), szY,
+                   lm + Scale(110,dpi) + badgeW + Scale(8,dpi) + Scale(30,dpi), szY + Scale(30,dpi)};
+        RECT rM = {rP.right + Scale(6,dpi), szY, rP.right + Scale(6,dpi) + Scale(30,dpi), szY + Scale(30,dpi)};
+        // Toggle Y: 152 + 30 + 18 + 14 + 22 + 24 + 34 = 294 (+1 for centering) = 295
+        int dlY  = Scale(295, dpi);
+        RECT rS  = {lm, dlY,              lm + Scale(20,dpi), dlY + Scale(20,dpi)};
+        RECT rAsk= {lm, dlY + Scale(36,dpi), lm + Scale(20,dpi), dlY + Scale(36,dpi) + Scale(20,dpi)};
+
+        if (PtInRect(&rL, pt)) g_currentTheme = THEME_LIGHT;
+        else if (PtInRect(&rD, pt)) g_currentTheme = THEME_DARK;
+        else if (PtInRect(&rA, pt)) g_currentTheme = THEME_AMOLED;
+        else if (PtInRect(&rP, pt)) g_textSizePercent = min(200, g_textSizePercent + 10);
+        else if (PtInRect(&rM, pt)) g_textSizePercent = max(50, g_textSizePercent - 10);
+        else if (PtInRect(&rS, pt)) g_useSmartDownload = !g_useSmartDownload;
+        else if (PtInRect(&rAsk, pt)) g_askEveryTime = !g_askEveryTime;
+        
+        DeleteObject(hMainBgBrush);
+        hMainBgBrush = CreateSolidBrush(GetMainBgColor());
+        UpdateLayout(hWnd);
+        InvalidateRect(hWnd, NULL, TRUE);
+        return 0;
+    }
+    if (g_showAbout) {
+      g_showAbout = false;
+      g_expandedIndex = -1;
+      ShowWindow(hAboutCard, SW_HIDE);
+      InvalidateRect(hWnd, NULL, TRUE);
+      return 0;
+    }
+    if (g_expandedIndex != -1) {
+      g_expandedIndex = -1;
+      InvalidateRect(hWnd, NULL, TRUE);
+      // Force all cards to reset
+      for (int i = 0; i < 6; i++) {
+        HWND hCard = GetDlgItem(hWnd, 2001 + i);
+        if (hCard)
+          SetWindowPos(hCard, NULL, 0, 0, CARD_WIDTH, CARD_HEIGHT,
+                       SWP_NOMOVE | SWP_NOZORDER);
+      }
+    }
+  } break;
+  case WM_DRAWITEM: {
+    LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
+    int dpi = GetDPI(hWnd);
+    if (pDIS->CtlID == ID_SETTINGS_BTN || pDIS->CtlID == ID_QUEUE_BTN || pDIS->CtlID == ID_BACK_TO_APPS_BTN) {
+      COLORREF bgColor = GetMainBgColor();
+      HBRUSH hTempBg = CreateSolidBrush(bgColor);
+      FillRect(pDIS->hDC, &pDIS->rcItem, hTempBg);
+      DeleteObject(hTempBg);
+
+      COLORREF btnBg = g_currentTheme == THEME_LIGHT ? RGB(230, 230, 250) : RGB(30, 30, 60);
+      COLORREF btnAccent = g_currentTheme == THEME_LIGHT ? WS_PRIMARY : RGB(100, 180, 255);
+      HBRUSH hBg = CreateSolidBrush(btnBg);
+      HPEN hPen = CreatePen(PS_SOLID, 2, btnAccent);
+      SelectObject(pDIS->hDC, hBg);
+      SelectObject(pDIS->hDC, hPen);
+      Ellipse(pDIS->hDC, pDIS->rcItem.left, pDIS->rcItem.top,
+              pDIS->rcItem.right, pDIS->rcItem.bottom);
+      SetBkMode(pDIS->hDC, TRANSPARENT);
+      SetTextColor(pDIS->hDC, btnAccent);
+      HFONT old = (HFONT)SelectObject(pDIS->hDC, hFont);
+      wchar_t label[2] = {0};
+      if (pDIS->CtlID == ID_SETTINGS_BTN) label[0] = L'\x2699';
+      else if (pDIS->CtlID == ID_QUEUE_BTN) label[0] = L'Q';
+      else label[0] = L'\x2190'; // Left arrow for back button
+      DrawTextW(pDIS->hDC, label, 1, &pDIS->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      SelectObject(pDIS->hDC, old);
+      DeleteObject(hBg);
+      DeleteObject(hPen);
+      return TRUE;
+    } else if (pDIS->CtlID == ID_DOWNLOAD_ALL_BTN) {
+      COLORREF accent = g_currentTheme == THEME_LIGHT ? WS_PRIMARY : RGB(100, 180, 255);
+      HBRUSH hBg = CreateSolidBrush(accent);
+      FillRect(pDIS->hDC, &pDIS->rcItem, hBg);
+      SetBkMode(pDIS->hDC, TRANSPARENT);
+      SetTextColor(pDIS->hDC, g_currentTheme == THEME_LIGHT ? RGB(26, 26, 46) : RGB(20, 20, 40));
+      HFONT old = (HFONT)SelectObject(pDIS->hDC, hFont);
+      wchar_t txt[64];
+      GetWindowTextW(pDIS->hwndItem, txt, 64);
+      DrawTextW(pDIS->hDC, txt, -1, &pDIS->rcItem,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      SelectObject(pDIS->hDC, old);
+      DeleteObject(hBg);
+      return TRUE;
+    }
+    return FALSE;
+  }
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hWnd, &ps);
+
+    RECT rc;
+    GetClientRect(hWnd, &rc);
+    // Use theme-aware background color
+    COLORREF bgColor = GetMainBgColor();
+    HBRUSH hBgBrush = CreateSolidBrush(bgColor);
+    FillRect(hdc, &rc, hBgBrush);
+    DeleteObject(hBgBrush);
+
+    if (g_viewMode == VIEW_SETTINGS) {
+        int dpi = GetDPI(hWnd);
+        COLORREF txtCol     = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT    : RGB(220, 220, 220);
+        COLORREF dimCol     = (g_currentTheme == THEME_LIGHT) ? RGB(100, 100, 140) : RGB(130, 130, 160);
+        COLORREF accent     = (g_currentTheme == THEME_LIGHT) ? WS_PRIMARY       : RGB(100, 180, 255);
+        COLORREF cardCol    = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_SURFACE :
+                              (g_currentTheme == THEME_AMOLED) ? RGB(18, 18, 18) : RGB(32, 32, 60);
+        COLORREF divCol     = (g_currentTheme == THEME_LIGHT) ? RGB(180, 180, 220) : RGB(50, 50, 80);
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        // Helper: draw a rounded rectangle
+        auto RoundedRect = [&](RECT r, int rx, COLORREF fill, COLORREF border, int bw) {
+            HBRUSH hBr = CreateSolidBrush(fill);
+            HPEN   hPn = CreatePen(PS_SOLID, bw, border);
+            HBRUSH ob  = (HBRUSH)SelectObject(hdc, hBr);
+            HPEN   op  = (HPEN)SelectObject(hdc, hPn);
+            RoundRect(hdc, r.left, r.top, r.right, r.bottom, rx, rx);
+            SelectObject(hdc, ob); SelectObject(hdc, op);
+            DeleteObject(hBr); DeleteObject(hPn);
+        };
+
+        // Helper: draw a rounded checkbox
+        auto DrawToggle = [&](int x, int y, bool on) {
+            int sz = Scale(20, dpi);
+            RECT box = {x, y, x + sz, y + sz};
+            COLORREF fill   = on ? accent : GetMainBgColor();
+            COLORREF border = on ? accent : divCol;
+            RoundedRect(box, Scale(5, dpi), fill, border, 2);
+            if (on) {
+                // Draw white checkmark
+                HPEN hCk = CreatePen(PS_SOLID, Scale(2, dpi), RGB(255, 255, 255));
+                HPEN op  = (HPEN)SelectObject(hdc, hCk);
+                int mx = x + sz/2, my = y + sz/2;
+                MoveToEx(hdc, x + Scale(4,dpi), my,              NULL);
+                LineTo  (hdc, mx - Scale(1,dpi), y + sz - Scale(5,dpi));
+                LineTo  (hdc, x + sz - Scale(4,dpi), y + Scale(5,dpi));
+                SelectObject(hdc, op);
+                DeleteObject(hCk);
+            }
+        };
+
+        // Section label helper
+        HFONT hTitleFont   = CreateFontW(Scale(26, dpi), 0,0,0, FW_BOLD,   FALSE,FALSE,FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+        HFONT hSectionFont = CreateFontW(Scale(19, dpi), 0,0,0, FW_SEMIBOLD,FALSE,FALSE,FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+        HFONT hBodyFont    = CreateFontW(Scale(15, dpi), 0,0,0, FW_NORMAL,  FALSE,FALSE,FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+        HFONT hSmallFont   = CreateFontW(Scale(13, dpi), 0,0,0, FW_NORMAL,  FALSE,FALSE,FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+
+        int lm = Scale(28, dpi); // left margin
+        int y  = Scale(16, dpi) - g_scrollOffsetY;
+
+        // ── Title ──────────────────────────────────────────────
+        SelectObject(hdc, hTitleFont);
+        SetTextColor(hdc, txtCol);
+        TextOutW(hdc, Scale(70, dpi), y, L"Settings", 8);
+        y += Scale(46, dpi);
+
+        // ── Divider ────────────────────────────────────────────
+        HPEN hDiv = CreatePen(PS_SOLID, 1, divCol);
+        HPEN hOldP = (HPEN)SelectObject(hdc, hDiv);
+        MoveToEx(hdc, lm, y, NULL); LineTo(hdc, rc.right - lm, y);
+        SelectObject(hdc, hOldP); DeleteObject(hDiv);
+        y += Scale(14, dpi);
+
+        // ── THEME section ──────────────────────────────────────
+        SelectObject(hdc, hSectionFont);
+        SetTextColor(hdc, dimCol);
+        TextOutW(hdc, lm, y, L"APPEARANCE", 10);
+        y += Scale(22, dpi);
+
+        // Theme pill-buttons
+        const wchar_t* themeLabels[] = {L"Light", L"Dark", L"AMOLED Dark"};
+        Theme themeVals[] = {THEME_LIGHT, THEME_DARK, THEME_AMOLED};
+        int btnW = Scale(110, dpi), btnH = Scale(36, dpi), btnGap = Scale(10, dpi);
+        for (int i = 0; i < 3; i++) {
+            bool active = (g_currentTheme == themeVals[i]);
+            RECT br = {lm + i*(btnW+btnGap), y, lm + i*(btnW+btnGap) + btnW, y + btnH};
+            COLORREF fill   = active ? accent : cardCol;
+            COLORREF border = active ? accent : divCol;
+            RoundedRect(br, Scale(8,dpi), fill, border, active ? 2 : 1);
+            SelectObject(hdc, hBodyFont);
+            SetTextColor(hdc, active ? RGB(15,25,50) : txtCol);
+            DrawTextW(hdc, themeLabels[i], -1, &br, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        }
+        y += btnH + Scale(18, dpi);
+
+        // ── Text Size ──────────────────────────────────────────
+        SelectObject(hdc, hBodyFont);
+        SetTextColor(hdc, txtCol);
+        TextOutW(hdc, lm, y + Scale(4, dpi), L"Text Size", 9);
+
+        // badge showing current %
+        std::wstring pct = std::to_wstring(g_textSizePercent) + L"%";
+        int badgeW = Scale(50, dpi), badgeH = Scale(30, dpi);
+        RECT badge = {lm + Scale(110, dpi), y, lm + Scale(110, dpi) + badgeW, y + badgeH};
+        RoundedRect(badge, Scale(6,dpi), cardCol, divCol, 1);
+        SetTextColor(hdc, accent);
+        DrawTextW(hdc, pct.c_str(), -1, &badge, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+
+        // +/- buttons
+        int sbW = Scale(30, dpi), sbH = Scale(30, dpi);
+        RECT rPlus  = {badge.right + Scale(8,dpi), y, badge.right + Scale(8,dpi) + sbW, y + sbH};
+        RECT rMinus = {rPlus.right  + Scale(6,dpi), y, rPlus.right + Scale(6,dpi) + sbW, y + sbH};
+        RoundedRect(rPlus,  Scale(6,dpi), cardCol, accent, 1);
+        RoundedRect(rMinus, Scale(6,dpi), cardCol, accent, 1);
+        SetTextColor(hdc, accent);
+        DrawTextW(hdc, L"+", -1, &rPlus,  DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        DrawTextW(hdc, L"\x2212", -1, &rMinus, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        y += sbH + Scale(18, dpi);
+
+        // ── Divider ────────────────────────────────────────────
+        hDiv = CreatePen(PS_SOLID, 1, divCol);
+        hOldP = (HPEN)SelectObject(hdc, hDiv);
+        MoveToEx(hdc, lm, y, NULL); LineTo(hdc, rc.right - lm, y);
+        SelectObject(hdc, hOldP); DeleteObject(hDiv);
+        y += Scale(14, dpi);
+
+        // ── DOWNLOAD section ───────────────────────────────────
+        SelectObject(hdc, hSectionFont);
+        SetTextColor(hdc, dimCol);
+        TextOutW(hdc, lm, y, L"DOWNLOAD", 8);
+        y += Scale(22, dpi);
+
+        // "Download Location" label — edit box and Browse btn are native controls positioned by UpdateLayout
+        SelectObject(hdc, hBodyFont);
+        SetTextColor(hdc, txtCol);
+        TextOutW(hdc, lm, y, L"Download Location", 17);
+        y += Scale(24, dpi); // past the label text
+        // edit control sits here (placed by UpdateLayout at this y ≈ 260)
+        y += Scale(34, dpi); // past the edit control height + gap
+
+        // Smart download toggle
+        int toggleY = y + (Scale(24,dpi) - Scale(22,dpi))/2;
+        DrawToggle(lm, toggleY, g_useSmartDownload);
+        SelectObject(hdc, hBodyFont);
+        SetTextColor(hdc, txtCol);
+        TextOutW(hdc, lm + Scale(28, dpi), y, L"Smart install (extract ZIPs, add shortcuts)", 43);
+        y += Scale(36, dpi);
+
+        // Ask-every-time toggle
+        toggleY = y + (Scale(24,dpi) - Scale(22,dpi))/2;
+        DrawToggle(lm, toggleY, g_askEveryTime);
+        TextOutW(hdc, lm + Scale(28, dpi), y, L"Ask for download location every time", 36);
+        y += Scale(36, dpi);
+
+        // ── Divider ────────────────────────────────────────────
+        hDiv = CreatePen(PS_SOLID, 1, divCol);
+        hOldP = (HPEN)SelectObject(hdc, hDiv);
+        MoveToEx(hdc, lm, y, NULL); LineTo(hdc, rc.right - lm, y);
+        SelectObject(hdc, hOldP); DeleteObject(hDiv);
+        y += Scale(14, dpi);
+
+        // ── ABOUT section ──────────────────────────────────────
+        SelectObject(hdc, hSectionFont);
+        SetTextColor(hdc, dimCol);
+        TextOutW(hdc, lm, y, L"ABOUT", 5);
+        y += Scale(22, dpi);
+
+        // Calculate text height for dynamic sizing
+        SelectObject(hdc, hSmallFont);
+        SetTextColor(hdc, dimCol);
+        RECT aNoteCalc = {lm + Scale(14,dpi), 0, rc.right - lm - Scale(14,dpi), 1000};
+        int noteHeight = DrawTextW(hdc, L"Redesigned the main page's user interface - removed AppBar and InfoBar - added a new settings page - added DPI scaling - "
+            L"added light and AMOLED dark themes - added download path settings - added smart installing - added queueing/multi-downloading - "
+            L"the app is now useable during downloads", -1, &aNoteCalc, DT_LEFT|DT_WORDBREAK|DT_CALCRECT);
+        
+        // Dynamic card height based on text content
+        int cardHeight = Scale(58,dpi) + noteHeight + Scale(16,dpi); // 58 for title+version, noteHeight for text, 16 for padding
+        RECT aCard = {lm, y, rc.right - lm, y + cardHeight};
+        RoundedRect(aCard, Scale(10,dpi), cardCol, divCol, 1);
+        
+        SelectObject(hdc, hTitleFont);
+        SetTextColor(hdc, txtCol);
+        RECT aInner = {aCard.left+Scale(14,dpi), aCard.top+Scale(12,dpi),
+                       aCard.right-Scale(14,dpi), aCard.top+Scale(38,dpi)};
+        DrawTextW(hdc, L"whenthe's app installer", -1, &aInner, DT_LEFT|DT_SINGLELINE);
+        
+        SelectObject(hdc, hSectionFont);
+        SetTextColor(hdc, accent);
+        RECT aVer = {aCard.left+Scale(14,dpi), aCard.top+Scale(38,dpi),
+                     aCard.right-Scale(14,dpi), aCard.top+Scale(58,dpi)};
+        DrawTextW(hdc, L"Version 2, Build 1.0, Revision 8 \x2022 whenthe's app installer made by (C) whenthe's space.", -1, &aVer, DT_LEFT|DT_SINGLELINE);
+        
+        SelectObject(hdc, hBodyFont);
+        SetTextColor(hdc, dimCol);
+        RECT aNote = {aCard.left+Scale(14,dpi), aCard.top+Scale(58,dpi),
+                      aCard.right-Scale(14,dpi), aCard.bottom-Scale(8,dpi)};
+        DrawTextW(hdc, L"Redesigned the main page's user interface - removed AppBar and InfoBar - added a new settings page - added DPI scaling - "
+            L"added light and AMOLED dark themes - added download path settings - added smart installing - added queueing/multi-downloading - "
+            L"the app is now useable during downloads - added custom download & install notifications, these are WIP at the moment", -1, &aNote, DT_LEFT|DT_WORDBREAK);
+
+        DeleteObject(hTitleFont);
+        DeleteObject(hSectionFont);
+        DeleteObject(hBodyFont);
+        DeleteObject(hSmallFont);
+    }
+ else if (g_expandedIndex != -1) {
+      // Darken background
+      HDC memDC = CreateCompatibleDC(hdc);
+      HBITMAP hBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+      SelectObject(memDC, hBmp);
+      FillRect(memDC, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+      BLENDFUNCTION bf = {AC_SRC_OVER, 0, 120, 0};
+      AlphaBlend(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, rc.right,
+                 rc.bottom, bf);
+      DeleteObject(hBmp);
+      DeleteDC(memDC);
+    }
+
+    if (g_viewMode == VIEW_QUEUE) {
+      // Draw Queue View
+      int dpi = GetDPI(hWnd);
+      COLORREF textColor = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : RGB(220, 220, 220);
+      COLORREF rowBgColor = (g_currentTheme == THEME_LIGHT) ? RGB(230, 230, 250) : RGB(40, 40, 70);
+      SetTextColor(hdc, textColor);
+      SetBkMode(hdc, TRANSPARENT);
+      HFONT hTitleFont =
+          CreateFontW(Scale(28, dpi), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+      HFONT oldFont = (HFONT)SelectObject(hdc, hTitleFont);
+      TextOutW(hdc, Scale(70, dpi), Scale(15, dpi) - g_scrollOffsetY, L"Download Queue", 14);
+
+      HFONT hItemFont =
+          CreateFontW(Scale(18, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+      SelectObject(hdc, hItemFont);
+
+      int startY = Scale(80, dpi) - g_scrollOffsetY;
+      for (size_t i = 0; i < g_downloadQueue.size(); i++) {
+        int idx = g_downloadQueue[i];
+        HWND hCard = GetDlgItem(hWnd, 2001 + idx);
+        CardData *data = (CardData *)GetWindowLongPtr(hCard, GWLP_USERDATA);
+        if (data) {
+          RECT rc;
+          GetClientRect(hWnd, &rc);
+          RECT rowRect = {Scale(20, dpi), startY, rc.right - Scale(20, dpi),
+                          startY + Scale(50, dpi)};
+          HBRUSH hRowBrush = CreateSolidBrush(rowBgColor);
+          FillRect(hdc, &rowRect, hRowBrush);
+          DeleteObject(hRowBrush);
+
+          std::wstring itemText =
+              std::wstring(data->title) + L" (" + data->version + L")";
+          TextOutW(hdc, Scale(35, dpi), startY + Scale(12, dpi),
+                   itemText.c_str(), (int)itemText.length());
+
+          // Draw X button (simplified visual for now)
+          SetTextColor(hdc, RGB(255, 100, 100));
+          TextOutW(hdc, rc.right - Scale(60, dpi), startY + Scale(12, dpi),
+                   L"X", 1);
+          SetTextColor(hdc, textColor);
+        }
+        startY += Scale(60, dpi);
+      }
+      SelectObject(hdc, oldFont);
+      DeleteObject(hTitleFont);
+      DeleteObject(hItemFont);
+    }
+
+    EndPaint(hWnd, &ps);
+  } break;
+  case WM_ERASEBKGND:
+    return 1;
+  case WM_CTLCOLORSTATIC: {
+    HWND hStatic = (HWND)lParam;
+    int ctrlId = GetDlgCtrlID(hStatic);
+
+    // Theme-aware colors
+    COLORREF bgColor = GetMainBgColor();
+    COLORREF textColor = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : RGB(220, 220, 220);
+
+    // Main title on main background: make background transparent so it blends
+    if (ctrlId == 5001) {
+      SetBkMode((HDC)wParam, TRANSPARENT);
+      SetTextColor((HDC)wParam, textColor);
+      return (INT_PTR)GetStockObject(HOLLOW_BRUSH);
+    }
+    // Easter Egg text colors
+    if (ctrlId == ID_EE_TEXT1) {
+      SetBkColor((HDC)wParam, (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_BG : RGB(30, 30, 60));
+      SetTextColor((HDC)wParam, (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : eeColor1);
+      static HBRUSH hBrushEE = CreateSolidBrush(RGB(30, 30, 60));
+      static HBRUSH hBrushEELight = CreateSolidBrush(WS_LIGHT_BG);
+      return (INT_PTR)((g_currentTheme == THEME_LIGHT) ? hBrushEELight : hBrushEE);
+    }
+    if (ctrlId == ID_EE_TEXT2) {
+      SetBkColor((HDC)wParam, (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_BG : RGB(30, 30, 60));
+      SetTextColor((HDC)wParam, (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : eeColor2);
+      static HBRUSH hBrushEE = CreateSolidBrush(RGB(30, 30, 60));
+      static HBRUSH hBrushEELight = CreateSolidBrush(WS_LIGHT_BG);
+      return (INT_PTR)((g_currentTheme == THEME_LIGHT) ? hBrushEELight : hBrushEE);
+    }
+    if (ctrlId == ID_EE_NOTICE || ctrlId == ID_EE_REST) {
+      SetBkColor((HDC)wParam, (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_BG : RGB(30, 30, 60));
+      SetTextColor((HDC)wParam, textColor);
+      static HBRUSH hBrushEE = CreateSolidBrush(RGB(30, 30, 60));
+      static HBRUSH hBrushEELight = CreateSolidBrush(WS_LIGHT_BG);
+      return (INT_PTR)((g_currentTheme == THEME_LIGHT) ? hBrushEELight : hBrushEE);
+    }
+    SetBkColor((HDC)wParam, bgColor);
+    SetTextColor((HDC)wParam, textColor);
+    // Return appropriate brush for theme
+    static HBRUSH hLightBrush = CreateSolidBrush(WS_LIGHT_BG);
+    return (INT_PTR)((g_currentTheme == THEME_LIGHT) ? hLightBrush : hMainBgBrush);
+  }
+  case WM_CTLCOLORLISTBOX: {
+    HDC hdc = (HDC)wParam;
+    COLORREF bgColor = GetMainBgColor();
+    COLORREF textColor = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : RGB(220, 220, 220);
+    SetBkColor(hdc, bgColor);
+    SetTextColor(hdc, textColor);
+    static HBRUSH hListBrush = CreateSolidBrush(RGB(30, 30, 60));
+    static HBRUSH hListBrushLight = CreateSolidBrush(WS_LIGHT_BG);
+    return (INT_PTR)((g_currentTheme == THEME_LIGHT) ? hListBrushLight : hListBrush);
+  }
+  case WM_CTLCOLOREDIT: {
+    HDC hdcEdit = (HDC)wParam;
+    COLORREF bgColor = (g_currentTheme == THEME_LIGHT) ? RGB(240, 240, 250) : RGB(30, 30, 60);
+    COLORREF textColor = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : RGB(220, 220, 220);
+    SetBkColor(hdcEdit, bgColor);
+    SetTextColor(hdcEdit, textColor);
+    static HBRUSH hEditBrush = CreateSolidBrush(RGB(30, 30, 60));
+    static HBRUSH hEditBrushLight = CreateSolidBrush(RGB(240, 240, 250));
+    return (INT_PTR)((g_currentTheme == THEME_LIGHT) ? hEditBrushLight : hEditBrush);
+  }
+  case WM_SYSCOLORCHANGE:
+    DrawMenuBar(hWnd);
+    break;
+  case WM_DESTROY:
+    for (int i = 0; i < 6; ++i) {
+      if (hCardIcons[i])
+        DestroyIcon(hCardIcons[i]);
+    }
+    PostQuitMessage(0);
+    break;
+  case WM_USER + 101: {
+    InstallInfo *info = (InstallInfo *)lParam;
+    PerformInstallation(hWnd, info);
+    return 0;
+  }
+  case WM_USER + 102: {
+    ShowToast(hWnd, L"Download Failed!", RGB(255, 50, 50));
+    return 0;
+  }
+  default:
+    return DefWindowProc(hWnd, message, wParam, lParam);
+  }
+  return 0;
 }
 
 // Message handler for about box.
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
-    UNREFERENCED_PARAMETER(lParam);
-    switch (message) {
-    case WM_INITDIALOG:
-        return (INT_PTR)TRUE;
+  UNREFERENCED_PARAMETER(lParam);
+  switch (message) {
+  case WM_INITDIALOG:
+    return (INT_PTR)TRUE;
 
-    case WM_COMMAND:
-        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-            EndDialog(hDlg, LOWORD(wParam));
-            return (INT_PTR)TRUE;
+  case WM_COMMAND:
+    if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+      EndDialog(hDlg, LOWORD(wParam));
+      return (INT_PTR)TRUE;
+    }
+    break;
+  }
+  return (INT_PTR)FALSE;
+}
+
+static HWND g_hActiveToast = nullptr;
+
+LRESULT CALLBACK ToastProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  static COLORREF toastColor = RGB(100, 180, 255);
+  switch (msg) {
+  case WM_CREATE: {
+    LPCREATESTRUCT pcs = (LPCREATESTRUCT)lParam;
+    toastColor = (COLORREF)(uintptr_t)pcs->lpCreateParams;
+    return 0;
+  }
+  case WM_TIMER:
+    DestroyWindow(hWnd);
+    return 0;
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hWnd, &ps);
+    RECT rc;
+    GetClientRect(hWnd, &rc);
+    COLORREF bgColor = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_SURFACE : RGB(30, 30, 60);
+    COLORREF textColor = (g_currentTheme == THEME_LIGHT) ? WS_LIGHT_TEXT : RGB(220, 220, 220);
+    HBRUSH hBg = CreateSolidBrush(bgColor);
+    HPEN hPen = CreatePen(PS_SOLID, 2, toastColor);
+    HBRUSH oldB = (HBRUSH)SelectObject(hdc, hBg);
+    HPEN oldP = (HPEN)SelectObject(hdc, hPen);
+    RoundRect(hdc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, 15, 15);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, textColor);
+    HFONT hTFont =
+        CreateFontW(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HFONT oldF = (HFONT)SelectObject(hdc, hTFont);
+    wchar_t text[256];
+    GetWindowTextW(hWnd, text, 256);
+    DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, oldF);
+    DeleteObject(hTFont);
+    SelectObject(hdc, oldB);
+    SelectObject(hdc, oldP);
+    DeleteObject(hBg);
+    DeleteObject(hPen);
+    EndPaint(hWnd, &ps);
+    return 0;
+  }
+  case WM_DESTROY:
+    if (hWnd == g_hActiveToast)
+      g_hActiveToast = nullptr;
+    return 0;
+  }
+  return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static std::wstring FetchURL(LPCWSTR url) {
+  std::wstring result;
+  HINTERNET hInternet =
+      InternetOpenW(L"WAI", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+  if (hInternet) {
+    HINTERNET hConnect =
+        InternetOpenUrlW(hInternet, url, NULL, 0,
+                         INTERNET_FLAG_RELOAD | INTERNET_FLAG_SECURE, 0);
+    if (hConnect) {
+      char buffer[1024];
+      DWORD bytesRead;
+      while (
+          InternetReadFile(hConnect, buffer, sizeof(buffer) - 1, &bytesRead) &&
+          bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        std::string s(buffer);
+        result += std::wstring(s.begin(), s.end());
+      }
+      InternetCloseHandle(hConnect);
+    }
+    InternetCloseHandle(hInternet);
+  }
+  return result;
+}
+
+static std::wstring GetLatestGitHubTag(const std::wstring &url) {
+  if (url.find(L"github.com") == std::wstring::npos)
+    return L"";
+
+  // Extract repo path: https://github.com/user/repo/...
+  size_t start = url.find(L"github.com/") + 11;
+  size_t end = url.find(L"/", start);
+  if (end == std::wstring::npos)
+    return L"";
+  end = url.find(L"/", end + 1);
+  if (end == std::wstring::npos)
+    end = url.length();
+
+  std::wstring repo = url.substr(start, end - start);
+  std::wstring apiURL =
+      L"https://api.github.com/repos/" + repo + L"/releases/latest";
+
+  std::wstring json = FetchURL(apiURL.c_str());
+  size_t tagPos = json.find(L"\"tag_name\":\"");
+  if (tagPos != std::wstring::npos) {
+    tagPos += 12;
+    size_t tagEnd = json.find(L"\"", tagPos);
+    return json.substr(tagPos, tagEnd - tagPos);
+  }
+  return L"";
+}
+
+static void CheckForAppUpdates(HWND hWnd) {
+  // This would ideally be run in a thread
+  std::thread([hWnd]() {
+    for (int i = 0; i < 6; i++) {
+      HWND hCard = GetDlgItem(hWnd, 2001 + i);
+      if (!hCard)
+        continue;
+      CardData *data = (CardData *)GetWindowLongPtr(hCard, GWLP_USERDATA);
+      if (data && wcslen(data->url) > 0) {
+        std::wstring latest = GetLatestGitHubTag(data->url);
+        if (!latest.empty()) {
+          g_latestVersions[i] = latest;
+          InvalidateRect(hCard, NULL, TRUE);
         }
+      }
+    }
+  }).detach();
+}
+
+static std::wstring FindExecutable(const std::wstring &directory) {
+  std::wstring result = L"";
+  WIN32_FIND_DATAW ffd;
+  std::wstring searchPath = directory + L"\\*";
+  HANDLE hFind = FindFirstFileW(searchPath.c_str(), &ffd);
+  if (hFind == INVALID_HANDLE_VALUE)
+    return L"";
+
+  do {
+    if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      if (wcscmp(ffd.cFileName, L".") != 0 &&
+          wcscmp(ffd.cFileName, L"..") != 0) {
+        std::wstring subExec =
+            FindExecutable(directory + L"\\" + ffd.cFileName);
+        if (!subExec.empty()) {
+          result = subExec;
+          break;
+        }
+      }
+    } else {
+      std::wstring fileName = ffd.cFileName;
+      if (fileName.length() > 4 &&
+          _wcsicmp(fileName.substr(fileName.length() - 4).c_str(), L".exe") ==
+              0) {
+        result = directory + L"\\" + fileName;
         break;
+      }
     }
-    return (INT_PTR)FALSE;
+  } while (FindNextFileW(hFind, &ffd) != 0);
+
+  FindClose(hFind);
+  return result;
 }
 
-void DownloadAndInstall(HWND hWnd, LPCWSTR url, LPCWSTR localPath) {
-    SetWindowTextW(hStatusLabel, L"Downloading...  (App may be unresponsive, but "
-        L"the download progress will still continue.)");
-    ShowWindow(hStatusLabel, SW_SHOW);
-    if (hProgressBar) {
-        ShowWindow(hProgressBar, SW_SHOW);
-        SendMessage(hProgressBar, PBM_SETMARQUEE, TRUE, 0);
+static HRESULT CreateShortcut(LPCWSTR lpszPathObj, LPCWSTR lpszPathLink,
+                              LPCWSTR lpszDesc) {
+  HRESULT hres;
+  IShellLink *psl;
+  hres = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                          IID_IShellLink, (LPVOID *)&psl);
+  if (SUCCEEDED(hres)) {
+    psl->SetPath(lpszPathObj);
+    psl->SetDescription(lpszDesc);
+    IPersistFile *ppf;
+    hres = psl->QueryInterface(IID_IPersistFile, (LPVOID *)&ppf);
+    if (SUCCEEDED(hres)) {
+      hres = ppf->Save(lpszPathLink, TRUE);
+      ppf->Release();
     }
-    UpdateWindow(hStatusLabel);
+    psl->Release();
+  }
+  return hres;
+}
 
-    HRESULT hr = URLDownloadToFileW(nullptr, url, localPath, 0, nullptr);
+static std::wstring GetWSApplicationsPath() {
+  wchar_t path[MAX_PATH];
+  GetEnvironmentVariableW(L"ProgramFiles", path, MAX_PATH);
+  std::wstring wsPath = path;
+  wsPath += L"\\WS Applications";
+  CreateDirectoryW(wsPath.c_str(), NULL);
+  return wsPath;
+}
+
+static void PerformInstallation(HWND hWnd, InstallInfo *info) {
+  std::wstring baseDir = GetWSApplicationsPath();
+  std::wstring appDir = baseDir + L"\\" + info->appName;
+  CreateDirectoryW(appDir.c_str(), NULL);
+
+  if (!g_useSmartDownload) {
+    ShowToast(hWnd, (L"Download Complete: " + info->appName).c_str(), RGB(100, 255, 100));
+    delete info;
+    return;
+  }
+
+  bool isZip = (info->filePath.find(L".zip") != std::wstring::npos);
+  bool isMsi = (info->filePath.find(L".msi") != std::wstring::npos);
+
+  if (isZip) {
+    std::wstring cmd = L"powershell -command \"Expand-Archive -Path '";
+    cmd += info->filePath;
+    cmd += L"' -DestinationPath '";
+    cmd += appDir;
+    cmd += L"' -Force\"";
+
+    STARTUPINFOW si = {sizeof(si)};
+    PROCESS_INFORMATION pi;
+    if (CreateProcessW(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE,
+                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+      WaitForSingleObject(pi.hProcess, INFINITE);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+    }
+
+    // Try to find an .exe to shortcut using Win32 FindFirstFile
+    std::wstring exePath = FindExecutable(appDir);
+    if (!exePath.empty()) {
+      wchar_t desktop[MAX_PATH];
+      SHGetSpecialFolderPathW(NULL, desktop, CSIDL_DESKTOPDIRECTORY, FALSE);
+      std::wstring lnkPath =
+          std::wstring(desktop) + L"\\" + info->appName + L".lnk";
+      CreateShortcut(exePath.c_str(), lnkPath.c_str(), info->appName.c_str());
+    }
+  }
+
+  // Save version to file
+  std::wstring verFile = appDir + L"\\version.txt";
+  HANDLE hFile = CreateFileW(verFile.c_str(), GENERIC_WRITE, 0, NULL,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile != INVALID_HANDLE_VALUE) {
+    DWORD written;
+    WriteFile(hFile, info->version.c_str(),
+              (DWORD)(info->version.length() * sizeof(wchar_t)), &written,
+              NULL);
+    CloseHandle(hFile);
+  }
+
+  ShowToast(
+      hWnd,
+      (L"Installed: " + info->appName + L" (" + info->version + L")").c_str(),
+      RGB(50, 255, 50));
+  delete info;
+}
+
+void ShowToast(HWND hOwner, LPCWSTR message, COLORREF color) {
+  if (g_hActiveToast && IsWindow(g_hActiveToast))
+    DestroyWindow(g_hActiveToast);
+  int w = 350, h = 60;
+  RECT rc;
+  GetWindowRect(hOwner, &rc);
+  int x = rc.right - w - 40, y = rc.bottom - h - 40;
+  g_hActiveToast = CreateWindowExW(
+      WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"ToastClass", message,
+      WS_POPUP | WS_VISIBLE, x, y, w, h, hOwner, nullptr,
+      GetModuleHandle(nullptr), (LPVOID)(uintptr_t)color);
+  if (g_hActiveToast) {
+    SetLayeredWindowAttributes(g_hActiveToast, 0, 230, LWA_ALPHA);
+    SetTimer(g_hActiveToast, 1, 4000, nullptr);
+  }
+}
+
+void DownloadAndInstall(HWND hWnd, LPCWSTR url, LPCWSTR localPath,
+                        LPCWSTR appName, LPCWSTR version) {
+  wchar_t currentPath[MAX_PATH];
+  GetWindowTextW(hSetPathEdit, currentPath, MAX_PATH);
+  g_downloadLocation = currentPath;
+
+  std::wstring finalPath = localPath;
+  
+  if (g_askEveryTime) {
+      wchar_t szFile[MAX_PATH] = { 0 };
+      wcsncpy_s(szFile, GetFileNameFromUrl(url).c_str(), _TRUNCATE);
+      OPENFILENAMEW ofn = { 0 };
+      ofn.lStructSize = sizeof(ofn);
+      ofn.hwndOwner = hWnd;
+      ofn.lpstrFile = szFile;
+      ofn.nMaxFile = sizeof(szFile);
+      ofn.lpstrFilter = L"All Files\0*.*\0";
+      ofn.nFilterIndex = 1;
+      ofn.lpstrInitialDir = g_downloadLocation.c_str();
+      ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+      if (GetSaveFileNameW(&ofn)) {
+          finalPath = szFile;
+      } else {
+          return; // Cancelled
+      }
+  } else if (!g_downloadLocation.empty()) {
+      finalPath = g_downloadLocation + L"\\" + GetFileNameFromUrl(url);
+  }
+
+  std::wstring startedMsg = L"Download Started: ";
+  startedMsg += appName;
+  ShowToast(hWnd, startedMsg.c_str(), RGB(100, 180, 255));
+
+  InstallInfo *info = new InstallInfo();
+  info->filePath = finalPath;
+  info->appName = appName;
+  info->version = version;
+
+  std::wstring u = url;
+  std::wstring lp = finalPath;
+  std::thread([hWnd, u, lp, info]() {
+    HRESULT hr = URLDownloadToFileW(nullptr, u.c_str(), lp.c_str(), 0, nullptr);
     if (SUCCEEDED(hr)) {
-        SetWindowTextW(hStatusLabel, L"Downloaded successfully.");
-        if (hProgressBar) {
-            SendMessage(hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-            ShowWindow(hProgressBar, SW_HIDE);
-        }
-        ShellExecuteW(nullptr, L"open", localPath, nullptr, nullptr, SW_SHOWNORMAL);
+      PostMessage(hWnd, WM_USER + 101, 0, (LPARAM)info);
+    } else {
+      delete info;
+      PostMessage(hWnd, WM_USER + 102, 0, 0);
     }
-    else {
-        SetWindowTextW(hStatusLabel, L"Failed to download - Try again later");
-        if (hProgressBar) {
-            SendMessage(hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-            ShowWindow(hProgressBar, SW_HIDE);
-        }
-    }
-}
-
-void HideDragInstallUI(HWND hWnd) {
-    if (hStatusLabel) {
-        ShowWindow(hStatusLabel, SW_HIDE);
-        SetWindowTextW(hStatusLabel, L"");
-    }
-    if (hProgressBar) {
-        SendMessage(hProgressBar, PBM_SETMARQUEE, FALSE, 0);
-        ShowWindow(hProgressBar, SW_HIDE);
-    }
+  }).detach();
 }
 
 // Timer callback for long-press detection
 void CALLBACK LongPressTimerProc(HWND hWnd, UINT uMsg, UINT_PTR idEvent,
-    DWORD dwTime) {
-    if (idEvent == ID_LONGPRESS_TIMER && g_isLongPressing &&
-        g_longPressIndex >= 0) {
-        // Long press detected - trigger download
-        g_isLongPressing = false;
-        KillTimer(hWnd, ID_LONGPRESS_TIMER);
+                                 DWORD dwTime) {
+  if (idEvent == ID_LONGPRESS_TIMER && g_isLongPressing &&
+      g_longPressIndex >= 0) {
+    // Long press detected - trigger download
+    g_isLongPressing = false;
+    KillTimer(hWnd, ID_LONGPRESS_TIMER);
 
-        // Get the selected item text
-        wchar_t buffer[128] = { 0 };
-        SendMessageW(hSidebarList, LB_GETTEXT, g_longPressIndex, (LPARAM)buffer);
+    // Get the selected item text
+    wchar_t buffer[128] = {0};
+    SendMessageW(hSidebarList, LB_GETTEXT, g_longPressIndex, (LPARAM)buffer);
 
-        // Find matching card data and trigger download
-        for (int i = 0; i < 6; ++i) {
-            HWND hCard = GetDlgItem(hWnd, 2001 + i);
-            if (!hCard)
-                continue;
-            CardData* d = (CardData*)GetWindowLongPtr(hCard, GWLP_USERDATA);
-            if (d && wcscmp(d->title, buffer) == 0) {
-                if (wcslen(d->url) == 0) {
-                    SetWindowTextW(hStatusLabel, L"No download link available.");
-                    ShowWindow(hStatusLabel, SW_SHOW);
-                }
-                else if (!IsDownloadableUrl(d->url)) {
-                    // It's a redirect/website link - open in browser
-                    ShellExecuteW(nullptr, L"open", d->url, nullptr, nullptr, SW_SHOWNORMAL);
-                }
-                else {
-                    std::wstring downloadsPath = GetDownloadsPath();
-                    std::wstring fileName = GetFileNameFromUrl(d->url);
-                    std::wstring fullPath = downloadsPath + L"\\" + fileName;
-                    std::wstring msg = L"Do you want to download the following app: \"" +
-                        std::wstring(d->title) + L"\"?";
-                    int result = MessageBoxW(hWnd, msg.c_str(), L"Long-press Shortcut",
-                        MB_ICONINFORMATION | MB_YESNO);
-                    if (result == IDYES) {
-                        DownloadAndInstall(hWnd, d->url, fullPath.c_str());
-                    }
-                }
-                break;
-            }
+    // Find matching card data and trigger download
+    for (int i = 0; i < 6; ++i) {
+      HWND hCard = GetDlgItem(hWnd, 2001 + i);
+      if (!hCard)
+        continue;
+      CardData *d = (CardData *)GetWindowLongPtr(hCard, GWLP_USERDATA);
+      if (d && wcscmp(d->title, buffer) == 0) {
+        if (wcslen(d->url) == 0) {
+        } else if (!IsDownloadableUrl(d->url)) {
+          // It's a redirect/website link - open in browser
+          ShellExecuteW(nullptr, L"open", d->url, nullptr, nullptr,
+                        SW_SHOWNORMAL);
+        } else {
+          std::wstring downloadsPath = GetDownloadsPath();
+          std::wstring fileName = GetFileNameFromUrl(d->url);
+          std::wstring fullPath = downloadsPath + L"\\" + fileName;
+          std::wstring msg = L"Do you want to download the following app: \"" +
+                             std::wstring(d->title) + L"\"?";
+          int result = MessageBoxW(hWnd, msg.c_str(), L"Long-press Shortcut",
+                                   MB_ICONINFORMATION | MB_YESNO);
+          if (result == IDYES) {
+            DownloadAndInstall(hWnd, d->url, fullPath.c_str(), d->title,
+                               d->version);
+          }
         }
+        break;
+      }
     }
+  }
 }
 
 // Sidebar list subclass proc to handle long-press detection
 LRESULT CALLBACK SidebarListProc(HWND hwnd, UINT msg, WPARAM wParam,
-    LPARAM lParam) {
-    switch (msg) {
-    case WM_LBUTTONDOWN: {
-        // Start long-press timer (500ms delay)
-        g_isLongPressing = true;
-        g_longPressIndex = (int)SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, lParam);
-        SetTimer(GetParent(GetParent(hwnd)), ID_LONGPRESS_TIMER, 500,
-            LongPressTimerProc);
-    } break;
-    case WM_LBUTTONUP: {
-        // Cancel long-press if mouse is released early
-        if (g_isLongPressing) {
-            g_isLongPressing = false;
-            KillTimer(GetParent(GetParent(hwnd)), ID_LONGPRESS_TIMER);
-        }
-    } break;
-    case WM_MOUSEMOVE: {
-        // Cancel long-press if mouse moves too far
-        if (g_isLongPressing) {
-            g_isLongPressing = false;
-            KillTimer(GetParent(GetParent(hwnd)), ID_LONGPRESS_TIMER);
-        }
-    } break;
-    default:
-        return CallWindowProc(OldSidebarListProc, hwnd, msg, wParam, lParam);
+                                 LPARAM lParam) {
+  switch (msg) {
+  case WM_LBUTTONDOWN: {
+    // Start long-press timer (500ms delay)
+    g_isLongPressing = true;
+    g_longPressIndex = (int)SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, lParam);
+    SetTimer(GetParent(GetParent(hwnd)), ID_LONGPRESS_TIMER, 500,
+             LongPressTimerProc);
+  } break;
+  case WM_LBUTTONUP: {
+    // Cancel long-press if mouse is released early
+    if (g_isLongPressing) {
+      g_isLongPressing = false;
+      KillTimer(GetParent(GetParent(hwnd)), ID_LONGPRESS_TIMER);
     }
+  } break;
+  case WM_MOUSEMOVE: {
+    // Cancel long-press if mouse moves too far
+    if (g_isLongPressing) {
+      g_isLongPressing = false;
+      KillTimer(GetParent(GetParent(hwnd)), ID_LONGPRESS_TIMER);
+    }
+  } break;
+  default:
     return CallWindowProc(OldSidebarListProc, hwnd, msg, wParam, lParam);
+  }
+  return CallWindowProc(OldSidebarListProc, hwnd, msg, wParam, lParam);
 }
 
 // Replace the existing CardProc function with this version:
 LRESULT CALLBACK CardProc(HWND hWnd, UINT message, WPARAM wParam,
-    LPARAM lParam) {
-    CardData* data = (CardData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-    static bool btnPressed = false;
+                          LPARAM lParam) {
+  CardData *data = (CardData *)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+  int myId = GetDlgCtrlID(hWnd);
+  int myIndex = (myId == ID_ABOUT_CARD) ? 999 : (myId - 2001);
 
-    switch (message) {
-    case WM_ERASEBKGND:
-        return 1;
+  switch (message) {
+  case WM_ERASEBKGND:
+    return 1;
 
-    case WM_CREATE:
-        // No longer creating a physical button
-        break;
+  case WM_MOUSEMOVE: {
+    if (g_showAbout && myIndex != 999)
+      return 0; // Disable hover for other cards when About is shown
+    if (myIndex == 999)
+      return 0; // Don't expand About card further
+    if (g_expandedIndex != myIndex) {
+      g_expandedIndex = myIndex;
+      BringWindowToTop(hWnd);
+      int dpi = GetDPI(hWnd);
+      SetWindowPos(hWnd, HWND_TOP, 0, 0, Scale(CARD_WIDTH + 75, dpi),
+                   Scale(CARD_HEIGHT + 45, dpi), SWP_NOMOVE);
+      TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hWnd, HOVER_DEFAULT};
+      TrackMouseEvent(&tme);
+      InvalidateRect(GetParent(hWnd), NULL, TRUE);
+      UpdateWindow(GetParent(hWnd));
+      InvalidateRect(hWnd, NULL, TRUE);
+    }
+    return 0;
+  }
+  case WM_MOUSELEAVE: {
+    if (g_isMenuOpen)
+      return 0;
+    if (g_showAbout && myIndex != 999)
+      return 0;
+    if (myIndex == 999)
+      return 0;
+    g_expandedIndex = -1;
+    SetWindowPos(hWnd, NULL, 0, 0, CARD_WIDTH, CARD_HEIGHT,
+                 SWP_NOMOVE | SWP_NOZORDER);
+    InvalidateRect(GetParent(hWnd), NULL, TRUE);
+    UpdateWindow(GetParent(hWnd));
+    InvalidateRect(hWnd, NULL, TRUE);
+    return 0;
+  }
 
-    case WM_LBUTTONDOWN: {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        RECT btnRect = { CARD_WIDTH - 170, CARD_HEIGHT - 40, CARD_WIDTH - 10,
-                        CARD_HEIGHT - 10 };
+  case WM_LBUTTONDOWN: {
+    if (myIndex == 999) {
+      // Clicking ON the about card shouldn't close it, only clicking OFF
+      // should.
+      return 0;
+    }
+    int dpi = GetDPI(hWnd);
+    if (g_expandedIndex == myIndex) {
+      POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+      int curW = Scale(CARD_WIDTH + 75, dpi);
+      int curH = Scale(CARD_HEIGHT + 45, dpi);
 
-        if (PtInRect(&btnRect, pt)) {
-            // Clicked on button area
-            btnPressed = true;
-            InvalidateRect(hWnd, NULL, FALSE);
-        }
-        else {
-            // Card selection (InfoBar update)
-            if (data) {
-                g_selected = *data;
-                int cardIndex = GetDlgCtrlID(hWnd) - 2001;
-                if (cardIndex >= 0 && cardIndex < 6 && hCardIcons[cardIndex]) {
-                    g_selectedIcon = hCardIcons[cardIndex];
-                    SendMessage(hDetailsIcon, STM_SETICON, (WPARAM)g_selectedIcon, 0);
-                }
-                SetWindowTextW(hDetailsTitle, g_selected.title);
-                SetWindowTextW(hDetailsDesc, g_selected.description);
+      // Add to Queue button rect
+      RECT btnRect = {curW - Scale(175, dpi), curH - Scale(50, dpi),
+                      curW - Scale(45, dpi), curH - Scale(15, dpi)};
+      // Dropdown button rect
+      RECT ddRect = {curW - Scale(40, dpi), curH - Scale(50, dpi),
+                     curW - Scale(15, dpi), curH - Scale(15, dpi)};
 
-                // Ensure standard description is shown and EE hidden
-                ShowWindow(hDetailsDesc, SW_SHOW);
-                ShowWindow(hEENotice, SW_HIDE);
-                ShowWindow(hEEText1, SW_HIDE);
-                ShowWindow(hEEText2, SW_HIDE);
-                ShowWindow(hEERest, SW_HIDE);
-                eeStage = 0;
-
-                if (hDetailsInstallBtn) {
-                    if (wcslen(g_selected.url) == 0) {
-                        SetWindowTextW(hDetailsInstallBtn, L"Not available");
-                        EnableWindow(hDetailsInstallBtn, FALSE);
-                    }
-                    else if (IsDownloadableUrl(g_selected.url)) {
-                        SetWindowTextW(hDetailsInstallBtn, L"Download and Install");
-                        EnableWindow(hDetailsInstallBtn, TRUE);
-                    }
-                    else {
-                        SetWindowTextW(hDetailsInstallBtn, L"Open Website");
-                        EnableWindow(hDetailsInstallBtn, TRUE);
-                    }
-                }
-            }
-            SetFocus(hWnd);
+      if (PtInRect(&btnRect, pt)) {
+        bool already = false;
+        for (int idx : g_downloadQueue)
+          if (idx == (myId - 2001))
+            already = true;
+        if (!already) {
+          g_downloadQueue.push_back(myId - 2001);
+          ShowToast(GetParent(hWnd),
+                    (std::wstring(data->title) + L" added to queue").c_str(),
+                    RGB(100, 255, 100));
+        } else {
+          ShowToast(GetParent(hWnd), L"Already in queue", RGB(255, 200, 50));
         }
         return 0;
-    }
-
-    case WM_LBUTTONUP: {
-        if (btnPressed) {
-            btnPressed = false;
-            InvalidateRect(hWnd, NULL, FALSE);
-
-            // Handle button click
-            if (data && wcslen(data->url) > 0) {
-                if (IsDownloadableUrl(data->url)) {
-                    std::wstring downloadsPath = GetDownloadsPath();
-                    std::wstring fileName = GetFileNameFromUrl(data->url);
-                    std::wstring fullPath = downloadsPath + L"\\" + fileName;
-                    std::wstring msg = L"Do you want to download and install " +
-                        std::wstring(data->title);
-                    int result =
-                        MessageBoxW(GetParent(hWnd), msg.c_str(), L"Confirm Download",
-                            MB_ICONINFORMATION | MB_YESNO);
-                    if (result == IDYES) {
-                        DownloadAndInstall(GetParent(hWnd), data->url, fullPath.c_str());
-                    }
-                }
-                else {
-                    ShellExecuteW(nullptr, L"open", data->url, nullptr, nullptr,
-                        SW_SHOWNORMAL);
-                }
-            }
+      } else if (PtInRect(&ddRect, pt)) {
+        HMENU hMenu = CreatePopupMenu();
+        AppendMenuW(hMenu, MF_STRING, 1, L"Download Now");
+        POINT screenPt = pt;
+        ClientToScreen(hWnd, &screenPt);
+        g_isMenuOpen = true;
+        int sel = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_RETURNCMD,
+                                 screenPt.x, screenPt.y, 0, hWnd, NULL);
+        g_isMenuOpen = false;
+        DestroyMenu(hMenu);
+        if (sel == 1) {
+          std::wstring downloadsPath = GetDownloadsPath();
+          std::wstring fileName = GetFileNameFromUrl(data->url);
+          std::wstring fullPath = downloadsPath + L"\\" + fileName;
+          DownloadAndInstall(GetParent(hWnd), data->url, fullPath.c_str(),
+                             data->title, data->version);
         }
         return 0;
+      }
+    } else {
+      g_expandedIndex = myIndex;
+      BringWindowToTop(hWnd);
+      SetWindowPos(hWnd, HWND_TOP, 0, 0, Scale(CARD_WIDTH + 75, dpi),
+                   Scale(CARD_HEIGHT + 45, dpi), SWP_NOMOVE);
+      InvalidateRect(GetParent(hWnd), NULL, TRUE);
+      UpdateWindow(GetParent(hWnd));
+      InvalidateRect(hWnd, NULL, TRUE);
+    }
+    SetFocus(hWnd);
+    return 0;
+  }
+
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hWnd, &ps);
+    int dpi = GetDPI(hWnd);
+    bool expanded = (g_expandedIndex == myIndex);
+    RECT clientRect;
+    GetClientRect(hWnd, &clientRect);
+    int curW = clientRect.right;
+    int curH = clientRect.bottom;
+
+    COLORREF avgColor = (myIndex >= 0 && myIndex < 6)
+                            ? g_cardAvgColor[myIndex]
+                            : RGB(30, 30, 60);
+    COLORREF bgColor = GetCardBgColor(avgColor);
+    COLORREF borderColor;
+    if (g_currentTheme == THEME_LIGHT)
+        borderColor = RGB(180, 180, 220);  // Subtle lavender border for light mode
+    else if (g_currentTheme == THEME_AMOLED)
+        borderColor = RGB(40, 40, 40);
+    else
+        borderColor = LightenForBorder(bgColor);
+    COLORREF textColor = GetCardTextColor(avgColor);
+
+    RECT cardRect = {0, 0, curW, curH};
+    HBRUSH hCardBgBrush = CreateSolidBrush(bgColor);
+    SelectObject(hdc, hCardBgBrush);
+    RoundRect(hdc, cardRect.left, cardRect.top, cardRect.right, cardRect.bottom,
+              Scale(20, dpi), Scale(20, dpi));
+    DeleteObject(hCardBgBrush);
+
+    HPEN hBorderPen = CreatePen(PS_SOLID, expanded ? 2 : 1,
+                                expanded ? RGB(100, 180, 255) : borderColor);
+    HPEN hOldPen = (HPEN)SelectObject(hdc, hBorderPen);
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    RoundRect(hdc, cardRect.left, cardRect.top, cardRect.right, cardRect.bottom,
+              Scale(20, dpi), Scale(20, dpi));
+
+    // Draw icon
+    HICON hIconToDraw =
+        (myIndex >= 0 && myIndex < 6)
+            ? hCardIcons[myIndex]
+            : LoadIcon(GetModuleHandle(NULL),
+                       MAKEINTRESOURCE(IDI_WHENTHESAPPINSTALLER));
+    if (hIconToDraw) {
+      DrawIconEx(hdc, (curW - Scale(32, dpi)) / 2, Scale(15, dpi), hIconToDraw,
+                 Scale(32, dpi), Scale(32, dpi), 0, nullptr, DI_NORMAL);
     }
 
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
+    // Draw title
+    SetBkMode(hdc, TRANSPARENT);
+    HFONT hTitleFont =
+        CreateFontW(Scale(22, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HFONT oldFont = (HFONT)SelectObject(hdc, hTitleFont);
+    SetTextColor(hdc, textColor);
+    RECT titleRect = {Scale(10, dpi), Scale(55, dpi), curW - Scale(10, dpi),
+                      Scale(110, dpi)};
+    DrawTextW(hdc, data->title, -1, &titleRect,
+              DT_CENTER | DT_WORDBREAK | DT_TOP);
+    SelectObject(hdc, oldFont);
+    DeleteObject(hTitleFont);
 
-        // Derive per-card colors from the icon's average color
-        int cardIndex = GetDlgCtrlID(hWnd) - 2001;
-        COLORREF avgColor = (cardIndex >= 0 && cardIndex < 6)
-            ? g_cardAvgColor[cardIndex] : RGB(30, 30, 60);
-        COLORREF bgColor = DarkenForCard(avgColor);
-        COLORREF borderColor = LightenForBorder(bgColor);
-        COLORREF textColor = TintForText(avgColor);
+    if (expanded) {
+      // Draw Version (newly added)
+      HFONT hVerFont =
+          CreateFontW(Scale(14, dpi), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+      oldFont = (HFONT)SelectObject(hdc, hVerFont);
+      COLORREF dimTextColor = (g_currentTheme == THEME_LIGHT) ? RGB(100, 100, 130) : RGB(150, 150, 150);
+      SetTextColor(hdc, dimTextColor);
+      RECT verRect = {Scale(20, dpi), Scale(85, dpi), curW - Scale(20, dpi),
+                      Scale(105, dpi)};
+      DrawTextW(hdc, data->version, -1, &verRect, DT_LEFT | DT_SINGLELINE);
 
-        // Fill card background with rounded corners
-        RECT cardRect;
-        GetClientRect(hWnd, &cardRect);
-        HBRUSH hCardBgBrush = CreateSolidBrush(bgColor);
-        SelectObject(hdc, hCardBgBrush);
-        RoundRect(hdc, cardRect.left, cardRect.top, cardRect.right, cardRect.bottom,
-            20, 20);
-        DeleteObject(hCardBgBrush);
+      // Draw Update Indicator if available
+      if (myIndex >= 0 && myIndex < 6 && !g_latestVersions[myIndex].empty() &&
+          g_latestVersions[myIndex] != data->version) {
+        SetTextColor(hdc, RGB(255, 100, 100));
+        RECT upRect = {Scale(100, dpi), Scale(85, dpi), curW - Scale(20, dpi),
+                       Scale(105, dpi)};
+        DrawTextW(hdc,
+                  (L"Update Available: " + g_latestVersions[myIndex]).c_str(),
+                  -1, &upRect, DT_LEFT | DT_SINGLELINE);
+        SetTextColor(hdc, RGB(150, 150, 150)); // reset
+      }
 
-        // Draw card border with rounded corners
-        HPEN hBorderPen = CreatePen(PS_SOLID, 1, borderColor);
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hBorderPen);
-        HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, cardRect.left, cardRect.top, cardRect.right, cardRect.bottom,
-            20, 20);
+      SelectObject(hdc, oldFont);
+      DeleteObject(hVerFont);
 
-        // Draw icon
-        if (cardIndex >= 0 && cardIndex < 6 && hCardIcons[cardIndex]) {
-            DrawIconEx(hdc, 20, 20, hCardIcons[cardIndex], 32, 32, 0, nullptr,
-                DI_NORMAL);
-        }
+      // Draw Description (shifted down slightly to make room for version)
+      HFONT hDescFont =
+          CreateFontW(Scale(16, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+      oldFont = (HFONT)SelectObject(hdc, hDescFont);
+      COLORREF descTextColor = (g_currentTheme == THEME_LIGHT) ? RGB(80, 80, 110) : RGB(200, 200, 200);
+      SetTextColor(hdc, descTextColor);
+      RECT descRect = {Scale(20, dpi), Scale(115, dpi), curW - Scale(20, dpi),
+                       curH - Scale(60, dpi)};
+      DrawTextW(hdc, data->description, -1, &descRect,
+                DT_LEFT | DT_WORDBREAK | DT_TOP);
+      SelectObject(hdc, oldFont);
+      DeleteObject(hDescFont);
 
-        // Draw title
-        SetBkMode(hdc, TRANSPARENT);
-        HFONT hTitleFont =
-            CreateFontW(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        HFONT oldFont = (HFONT)SelectObject(hdc, hTitleFont);
-        SetTextColor(hdc, textColor);
-        if (data) {
-            TextOutW(hdc, 70, 20, data->title, lstrlenW(data->title));
-        }
-        SelectObject(hdc, oldFont);
-        DeleteObject(hTitleFont);
-
-        // Draw custom button
-        RECT btnRect = { CARD_WIDTH - 170, CARD_HEIGHT - 40, CARD_WIDTH - 10,
-                        CARD_HEIGHT - 10 };
-
-        // Button border with transparent background
-        HPEN hBtnPen =
-            CreatePen(PS_SOLID, 2, RGB(100, 180, 255)); // Bright blue border
+      if (myIndex != 999) {
+        // Draw Add to Queue Button
+        RECT btnRect = {curW - Scale(175, dpi), curH - Scale(50, dpi),
+                        curW - Scale(45, dpi), curH - Scale(15, dpi)};
+        COLORREF btnColor = (g_currentTheme == THEME_LIGHT) ? WS_PRIMARY : RGB(100, 180, 255);
+        HPEN hBtnPen = CreatePen(PS_SOLID, 2, btnColor);
         SelectObject(hdc, hBtnPen);
-        SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, btnRect.left, btnRect.top, btnRect.right, btnRect.bottom, 6,
-            6);
+        RoundRect(hdc, btnRect.left, btnRect.top, btnRect.right, btnRect.bottom,
+                  Scale(8, dpi), Scale(8, dpi));
 
-        // Button text
-        HFONT hBtnFont =
-            CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        SetTextColor(hdc, btnColor);
+        HFONT hBtnFont = CreateFontW(
+            Scale(15, dpi), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         oldFont = (HFONT)SelectObject(hdc, hBtnFont);
-        SetTextColor(hdc, RGB(100, 180, 255));
 
-        const wchar_t* btnText = L"Download and Install";
-        if (data) {
-            if (wcslen(data->url) == 0) {
-                btnText = L"Not available";
-                SetTextColor(hdc, RGB(128, 128, 128));
-            }
-            else if (!IsDownloadableUrl(data->url)) {
-                btnText = L"Open Website";
-            }
-        }
+        DrawTextW(hdc, L"Add to Queue", -1, &btnRect,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        DrawTextW(hdc, btnText, -1, &btnRect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        // Draw Dropdown arrow button
+        RECT ddRect = {curW - Scale(40, dpi), curH - Scale(50, dpi),
+                       curW - Scale(15, dpi), curH - Scale(15, dpi)};
+        RoundRect(hdc, ddRect.left, ddRect.top, ddRect.right, ddRect.bottom,
+                  Scale(8, dpi), Scale(8, dpi));
+        DrawTextW(hdc, L"\x25BC", -1, &ddRect,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // Cleanup
         SelectObject(hdc, oldFont);
-        SelectObject(hdc, hOldPen);
-        SelectObject(hdc, hOldBrush);
         DeleteObject(hBtnFont);
         DeleteObject(hBtnPen);
-        DeleteObject(hBorderPen);
-
-        EndPaint(hWnd, &ps);
-        return 0;
+      }
+    } else if (g_expandedIndex != -1) {
+      // Darken this card if another card is expanded
+      HDC memDC = CreateCompatibleDC(hdc);
+      HBITMAP hBmp = CreateCompatibleBitmap(hdc, curW, curH);
+      SelectObject(memDC, hBmp);
+      FillRect(memDC, &cardRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
+      BLENDFUNCTION bf = {AC_SRC_OVER, 0, 120, 0};
+      AlphaBlend(hdc, 0, 0, curW, curH, memDC, 0, 0, curW, curH, bf);
+      DeleteObject(hBmp);
+      DeleteDC(memDC);
     }
 
-    case WM_DESTROY:
-        if (data)
-            delete data;
-        break;
-    }
-    return DefWindowProc(hWnd, message, wParam, lParam);
-}
-
-// BUGSHOT! Easter Egg(Click the whenthe's app installer(T1) text and the
-// version number(T2) in the About section in this order: T1 > T2 > T1 > T2)
-
-#define GAME_WIDTH 600
-#define GAME_HEIGHT 600
-#define ID_GAME_TIMER 9999
-
-struct GameEntity {
-    float x = 0.0f;
-    float y = 0.0f;
-    float vx = 0.0f;
-    float vy = 0.0f; // velocity for inertia
-    float w = 0.0f;
-    float h = 0.0f;
-    bool active = false;
-    int shootTimer = 0; // Timer for enemy shooting
-};
-
-struct GameState {
-    GameEntity player{};
-    std::vector<GameEntity> bullets;
-    std::vector<GameEntity> enemyBullets; // Enemy bullets!
-    std::vector<GameEntity> enemies;
-    int ammoCount = 25;
-    int killStreak = 0;
-    bool gameOver = false;
-    float playerAccel = 0.0f; // acceleration for smooth movement
-    float playerMaxSpeed = 0.0f;
-    float playerFriction = 0.0f;
-    int currentLevel = 1;
-};
-
-static GameState* g_gameState = nullptr;
-
-LRESULT CALLBACK SpaceShooterProc(HWND hWnd, UINT message, WPARAM wParam,
-    LPARAM lParam) {
-    switch (message) {
-    case WM_CREATE:
-        SetTimer(hWnd, ID_GAME_TIMER, 16, NULL); // ~60 FPS
-        return 0;
-
-    case WM_TIMER:
-        if (g_gameState && !g_gameState->gameOver) {
-            // Space Invaders-style discrete movement!
-            static int moveDelay = 0;
-            static bool leftWasPressed = false;
-            static bool rightWasPressed = false;
-
-            const int MOVE_STEP = 8; // How many pixels to jump
-            const int MOVE_COOLDOWN =
-                4; // Frames between moves (creates that chunky feel)
-
-            bool leftPressed = (GetAsyncKeyState(VK_LEFT) & 0x8000) != 0;
-            bool rightPressed = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
-
-            // Detect key press (not hold) for discrete movement
-            bool leftJustPressed = leftPressed && !leftWasPressed;
-            bool rightJustPressed = rightPressed && !rightWasPressed;
-
-            if (moveDelay > 0) {
-                moveDelay--;
-            }
-
-            // Discrete movement with cooldown
-            if (moveDelay == 0) {
-                if (leftPressed) {
-                    g_gameState->player.x -= MOVE_STEP;
-                    moveDelay = MOVE_COOLDOWN;
-                }
-                else if (rightPressed) {
-                    g_gameState->player.x += MOVE_STEP;
-                    moveDelay = MOVE_COOLDOWN;
-                }
-            }
-
-            leftWasPressed = leftPressed;
-            rightWasPressed = rightPressed;
-
-            // Clamp Player position (no bounce, just hard stop like Space Invaders)
-            if (g_gameState->player.x < 0) {
-                g_gameState->player.x = 0;
-            }
-            if (g_gameState->player.x > GAME_WIDTH - g_gameState->player.w) {
-                g_gameState->player.x = GAME_WIDTH - g_gameState->player.w;
-            }
-
-            // Shooting with slower fire rate (more 90s arcade feel)
-            static int shootCooldown = 0;
-            if (shootCooldown > 0)
-                shootCooldown--;
-            if ((GetAsyncKeyState(VK_SPACE) & 0x8000) && shootCooldown <= 0 &&
-                g_gameState->ammoCount > 0) {
-                GameEntity b;
-                b.x = g_gameState->player.x + g_gameState->player.w / 2 - 2;
-                b.y = g_gameState->player.y;
-                b.vx = 0;
-                b.vy = -10.0f; // bullet speed
-                b.w = 4;
-                b.h = 12;
-                b.active = true;
-                g_gameState->bullets.push_back(b);
-                g_gameState->ammoCount--; // Consume bullet
-                shootCooldown = 20;       // slower fire rate
-            }
-
-            // Update player Bullets
-            for (auto& b : g_gameState->bullets) {
-                if (b.active) {
-                    b.y += b.vy;
-                }
-                if (b.y < -20) {
-                    b.active = false;
-                    g_gameState->killStreak = 0; // Reset streak on miss
-                }
-            }
-
-            // Update Enemy Bullets
-            for (auto& b : g_gameState->enemyBullets) {
-                if (b.active) {
-                    b.y += b.vy;
-                }
-                if (b.y > GAME_HEIGHT + 20)
-                    b.active = false;
-
-                // Check collision with player
-                if (b.active &&
-                    b.x < g_gameState->player.x + g_gameState->player.w - 3 &&
-                    b.x + b.w > g_gameState->player.x + 3 &&
-                    b.y < g_gameState->player.y + g_gameState->player.h - 3 &&
-                    b.y + b.h > g_gameState->player.y + 3) {
-                    g_gameState->gameOver = true;
-                    b.active = false;
-                }
-            }
-
-            // Space Invaders-style enemy formation spawning
-            static int enemySpawnTimer = 0;
-            static int enemiesSpawned = 0;
-            static bool formationComplete = false;
-            static int currentLevelState = -1; // To track level changes
-
-            // Level initialization / transition
-            if (currentLevelState != g_gameState->currentLevel) {
-                currentLevelState = g_gameState->currentLevel;
-                enemiesSpawned = 0;
-                formationComplete = false;
-                enemySpawnTimer = 0;
-                g_gameState->bullets.clear();
-                g_gameState->enemyBullets.clear();
-                // Note: g_gameState->enemies should be empty here naturally if we
-                // cleared the level
-            }
-
-            // Check for level completion (all enemies spawned AND all enemies dead)
-            if (formationComplete && g_gameState->enemies.empty()) {
-                g_gameState->currentLevel++;
-                g_gameState->ammoCount +=
-                    25 + (g_gameState->currentLevel * 5); // Level up bonus
-                if (g_gameState->ammoCount > 256)
-                    g_gameState->ammoCount = 256; // Cap ammo
-                // Variables will be reset in the next frame due to currentLevelState
-                // check
-            }
-
-            // Spawn enemies in rows (Space Invaders formation)
-            // Scaling difficulty:
-            // Level 1: 4 rows (32 enemies), size 24
-            // Level 2: 5 rows (40 enemies), size 22
-            // Level 3: 6 rows (48 enemies), size 20
-            // ...
-            int rowsToSpawn = 4 + (g_gameState->currentLevel - 1);
-            if (rowsToSpawn > 8)
-                rowsToSpawn = 8; // Cap at 8 rows
-
-            float enemySize = 24.0f - (g_gameState->currentLevel - 1) * 2.0f;
-            if (enemySize < 12.0f)
-                enemySize = 12.0f; // Cap minimum size
-
-            int enemiesPerRow = 8;
-            int totalEnemies = rowsToSpawn * enemiesPerRow;
-
-            if (!formationComplete && enemySpawnTimer == 0) {
-                int row = enemiesSpawned / enemiesPerRow;
-                int col = enemiesSpawned % enemiesPerRow;
-
-                // Center the formation based on enemy size and count
-                float spacing = enemySize * 2.5f; // Spacing relative to size
-                float rowSpacing = enemySize * 1.6f;
-                float startX = (GAME_WIDTH - (enemiesPerRow * spacing)) / 2.0f +
-                    (spacing - enemySize) / 2.0f;
-                float startY = 80.0f;
-
-                if (enemiesSpawned < totalEnemies) {
-                    GameEntity e;
-                    e.x = startX + col * spacing;
-                    e.y = startY + row * rowSpacing;
-                    e.vx = 0; // Movement controlled globally
-                    e.vy = 0;
-                    e.w = enemySize;
-                    e.h = enemySize;
-                    e.active = true;
-                    // Random shoot timer
-                    e.shootTimer = 300 + (rand() % 121);
-                    // Higher levels shoot slightly faster
-                    e.shootTimer =
-                        max(30, e.shootTimer - (g_gameState->currentLevel * 10));
-
-                    g_gameState->enemies.push_back(e);
-                    enemiesSpawned++;
-                    enemySpawnTimer = 2; // Small delay between spawns
-                }
-                else {
-                    formationComplete = true;
-                }
-            }
-
-            if (enemySpawnTimer > 0)
-                enemySpawnTimer--;
-
-            // Space Invaders formation movement
-            static int moveTimer = 0;
-            static float formationDirection = 1.0f; // 1 = right, -1 = left
-            static float formationSpeed =
-                3.0f + (g_gameState->currentLevel * 0.5f); // Faster at higher levels
-            static bool shouldDropDown = false;
-
-            moveTimer++;
-            // Move frequency increases with level (harder!)
-            int moveInterval = max(5, 30 - (g_gameState->currentLevel * 2));
-
-            if (moveTimer > moveInterval) {
-                moveTimer = 0;
-
-                // Check if any enemy hit the edge
-                bool hitEdge = false;
-                for (auto& e : g_gameState->enemies) {
-                    if (!e.active)
-                        continue;
-                    if ((formationDirection > 0 && e.x + e.w >= GAME_WIDTH - 20) ||
-                        (formationDirection < 0 && e.x <= 20)) {
-                        hitEdge = true;
-                        break;
-                    }
-                }
-
-                if (hitEdge) {
-                    shouldDropDown = true;
-                    formationDirection *= -1; // Reverse direction
-                }
-
-                // Move all enemies as a formation
-                for (auto& e : g_gameState->enemies) {
-                    if (!e.active)
-                        continue;
-
-                    if (shouldDropDown) {
-                        e.y += 20; // Drop down
-                    }
-                    else {
-                        e.x += formationSpeed * formationDirection; // Move horizontally
-                    }
-                }
-
-                shouldDropDown = false;
-            }
-
-            // Update Enemies & Collision
-            for (auto& e : g_gameState->enemies) {
-                if (!e.active)
-                    continue;
-
-                // Enemy shooting logic
-                e.shootTimer--;
-                if (e.shootTimer <= 0) {
-                    // Check if this enemy is in the front row (can shoot)
-                    bool canShoot = true;
-                    for (auto& other : g_gameState->enemies) {
-                        if (!other.active)
-                            continue;
-                        // If there's another enemy directly below, this one can't shoot
-                        if (fabs(other.x - e.x) < (enemySize * 0.8f) && other.y > e.y) {
-                            canShoot = false;
-                            break;
-                        }
-                    }
-
-                    if (canShoot) {
-                        // Shoot!
-                        GameEntity bullet;
-                        bullet.x = e.x + e.w / 2 - 2;
-                        bullet.y = e.y + e.h;
-                        bullet.vx = 0;
-                        bullet.vy =
-                            4.0f + (g_gameState->currentLevel * 0.5f); // Faster bullets
-                        bullet.w = 4;
-                        bullet.h = 10;
-                        bullet.active = true;
-                        g_gameState->enemyBullets.push_back(bullet);
-                    }
-
-                    // Reset timer for next shot
-                    int baseTime = max(60, 300 - (g_gameState->currentLevel * 15));
-                    e.shootTimer = baseTime + (rand() % 120);
-                }
-
-                // Check if enemies reached the player line (game over!)
-                if (e.y + e.h >= g_gameState->player.y - 10) {
-                    g_gameState->gameOver = true;
-                }
-
-                if (e.y > GAME_HEIGHT + 20)
-                    e.active = false;
-
-                // Collision with player
-                if (e.x < g_gameState->player.x + g_gameState->player.w - 5 &&
-                    e.x + e.w > g_gameState->player.x + 5 &&
-                    e.y < g_gameState->player.y + g_gameState->player.h - 5 &&
-                    e.y + e.h > g_gameState->player.y + 5) {
-                    g_gameState->gameOver = true;
-                }
-
-                // Collision with bullets
-                for (auto& b : g_gameState->bullets) {
-                    if (b.active && e.active && b.x < e.x + e.w - 3 &&
-                        b.x + b.w > e.x + 3 && b.y < e.y + e.h - 3 &&
-                        b.y + b.h > e.y + 3) {
-                        e.active = false;
-                        b.active = false;
-
-                        // Streak and ammo logic
-                        g_gameState->killStreak++;
-                        int bonus = (g_gameState->killStreak >= 2)
-                            ? (g_gameState->killStreak - 1)
-                            : 0;
-                        g_gameState->ammoCount += 5 + bonus;
-                        if (g_gameState->ammoCount > 256)
-                            g_gameState->ammoCount = 256; // Cap ammo
-                    }
-                }
-            }
-
-            // Clean up
-            g_gameState->bullets.erase(
-                std::remove_if(g_gameState->bullets.begin(),
-                    g_gameState->bullets.end(),
-                    [](const GameEntity& e) { return !e.active; }),
-                g_gameState->bullets.end());
-            g_gameState->enemyBullets.erase(
-                std::remove_if(g_gameState->enemyBullets.begin(),
-                    g_gameState->enemyBullets.end(),
-                    [](const GameEntity& e) { return !e.active; }),
-                g_gameState->enemyBullets.end());
-            g_gameState->enemies.erase(
-                std::remove_if(g_gameState->enemies.begin(),
-                    g_gameState->enemies.end(),
-                    [](const GameEntity& e) { return !e.active; }),
-                g_gameState->enemies.end());
-
-            InvalidateRect(hWnd, NULL, FALSE);
-        }
-        return 0;
-
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT clientRect;
-        GetClientRect(hWnd, &clientRect);
-
-        // Create a memory DC for double buffering (reduces flicker - 90s
-        // technique!)
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP memBitmap =
-            CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
-        HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
-
-        // Main game area background (dark space)
-        HBRUSH bgBrush = CreateSolidBrush(RGB(10, 10, 30));
-        FillRect(memDC, &clientRect, bgBrush);
-        DeleteObject(bgBrush);
-
-        // Draw styled border (matching app's sidebar style)
-        const int borderWidth = 12;
-
-        // Outer rounded border with app's color scheme
-        HBRUSH borderBrush = CreateSolidBrush(RGB(30, 30, 60));
-        SelectObject(memDC, borderBrush);
-        HPEN borderPen = CreatePen(PS_SOLID, 2, RGB(40, 40, 70));
-        HPEN oldPen = (HPEN)SelectObject(memDC, borderPen);
-
-        // Draw rounded rectangle border
-        RoundRect(memDC, 0, 0, clientRect.right, clientRect.bottom, 20, 20);
-        RoundRect(memDC, borderWidth - 2, borderWidth - 2,
-            clientRect.right - borderWidth + 2,
-            clientRect.bottom - borderWidth + 2, 15, 15);
-
-        SelectObject(memDC, oldPen);
-        DeleteObject(borderPen);
-        DeleteObject(borderBrush);
-
-        // Inner game area
-        RECT gameArea = { borderWidth, borderWidth, clientRect.right - borderWidth,
-                         clientRect.bottom - borderWidth };
-
-        if (g_gameState) {
-            // Player (Green triangle spaceship - 90s style!)
-            HBRUSH pBrush = CreateSolidBrush(RGB(50, 255, 50));
-            SelectObject(memDC, pBrush);
-            HPEN pPen = CreatePen(PS_SOLID, 2, RGB(100, 255, 100));
-            SelectObject(memDC, pPen);
-
-            POINT triangle[3];
-            triangle[0] = { (LONG)(g_gameState->player.x + g_gameState->player.w / 2),
-                           (LONG)g_gameState->player.y };
-            triangle[1] = { (LONG)g_gameState->player.x,
-                           (LONG)(g_gameState->player.y + g_gameState->player.h) };
-            triangle[2] = { (LONG)(g_gameState->player.x + g_gameState->player.w),
-                           (LONG)(g_gameState->player.y + g_gameState->player.h) };
-            Polygon(memDC, triangle, 3);
-
-            DeleteObject(pBrush);
-            DeleteObject(pPen);
-
-            // Bullets (Bright cyan/yellow - classic arcade)
-            HBRUSH bBrush = CreateSolidBrush(RGB(255, 255, 100));
-            SelectObject(memDC, bBrush);
-            for (const auto& b : g_gameState->bullets) {
-                RECT bRect = { (LONG)b.x, (LONG)b.y, (LONG)(b.x + b.w),
-                              (LONG)(b.y + b.h) };
-                RoundRect(memDC, bRect.left, bRect.top, bRect.right, bRect.bottom, 4,
-                    4);
-            }
-            DeleteObject(bBrush);
-
-            // Enemy Bullets (Red/Orange - dangerous!)
-            HBRUSH ebBrush = CreateSolidBrush(RGB(255, 100, 50));
-            SelectObject(memDC, ebBrush);
-            for (const auto& b : g_gameState->enemyBullets) {
-                RECT bRect = { (LONG)b.x, (LONG)b.y, (LONG)(b.x + b.w),
-                              (LONG)(b.y + b.h) };
-                RoundRect(memDC, bRect.left, bRect.top, bRect.right, bRect.bottom, 4,
-                    4);
-            }
-            DeleteObject(ebBrush);
-
-            // Enemies (Red with pixel-art style outline)
-            for (const auto& e : g_gameState->enemies) {
-                // Inner fill
-                HBRUSH eBrush = CreateSolidBrush(RGB(255, 50, 50));
-                SelectObject(memDC, eBrush);
-                HPEN ePen = CreatePen(PS_SOLID, 2, RGB(255, 100, 100));
-                SelectObject(memDC, ePen);
-
-                RECT eRect = { (LONG)e.x, (LONG)e.y, (LONG)(e.x + e.w),
-                              (LONG)(e.y + e.h) };
-                RoundRect(memDC, eRect.left, eRect.top, eRect.right, eRect.bottom, 6,
-                    6);
-
-                DeleteObject(eBrush);
-                DeleteObject(ePen);
-            }
-
-            // Score & Level display (retro font style)
-            SetBkMode(memDC, TRANSPARENT);
-            HFONT scoreFont = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-                DEFAULT_PITCH | FF_MODERN, L"Courier New");
-            HFONT oldFont = (HFONT)SelectObject(memDC, scoreFont);
-
-            // Score shadow (90s effect)
-            SetTextColor(memDC, RGB(0, 0, 0));
-            std::wstring scoreText =
-                L"BULLETS: " + std::to_wstring(g_gameState->ammoCount) +
-                L"   LEVEL: " + std::to_wstring(g_gameState->currentLevel);
-            TextOutW(memDC, 22, 22, scoreText.c_str(), scoreText.length());
-
-            // Score text
-            SetTextColor(memDC, RGB(100, 255, 255));
-            TextOutW(memDC, 20, 20, scoreText.c_str(), scoreText.length());
-
-            if (g_gameState->gameOver) {
-                // Game Over with retro styling
-                HFONT bigFont = CreateFontW(48, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                    CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-                    DEFAULT_PITCH | FF_MODERN, L"Courier New");
-                SelectObject(memDC, bigFont);
-
-                std::wstring overText = L"GAME OVER";
-                // Shadow
-                SetTextColor(memDC, RGB(0, 0, 0));
-                TextOutW(memDC, GAME_WIDTH / 2 - 132, GAME_HEIGHT / 2 - 22,
-                    overText.c_str(), overText.length());
-                // Main text
-                SetTextColor(memDC, RGB(255, 100, 100));
-                TextOutW(memDC, GAME_WIDTH / 2 - 130, GAME_HEIGHT / 2 - 20,
-                    overText.c_str(), overText.length());
-
-                DeleteObject(bigFont);
-            }
-
-            SelectObject(memDC, oldFont);
-            DeleteObject(scoreFont);
-        }
-
-        // Blit the memory DC to screen
-        BitBlt(hdc, 0, 0, clientRect.right, clientRect.bottom, memDC, 0, 0,
-            SRCCOPY);
-
-        // Cleanup
-        SelectObject(memDC, oldBitmap);
-        DeleteObject(memBitmap);
-        DeleteDC(memDC);
-
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE && g_gameState && g_gameState->gameOver) {
-            DestroyWindow(hWnd);
-        }
-        return 0;
-
-    case WM_DESTROY:
-        KillTimer(hWnd, ID_GAME_TIMER);
-        if (g_gameState) {
-            delete g_gameState;
-            g_gameState = nullptr;
-        }
-        return 0;
-    }
-    return DefWindowProc(hWnd, message, wParam, lParam);
-}
-
-void StartSpaceShooter(HINSTANCE hInstance) {
-    if (g_gameState)
-        return; // already running
-
-    WNDCLASSW wc = { 0 };
-    wc.lpfnWndProc = SpaceShooterProc;
-    wc.hInstance = hInstance;
-    wc.lpszClassName = L"SpaceShooterWnd";
-    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    RegisterClassW(&wc);
-
-    g_gameState = new GameState();
-    g_gameState->player.x = GAME_WIDTH / 2 - 15;
-    g_gameState->player.y = GAME_HEIGHT - 70;
-    g_gameState->player.w = 30;
-    g_gameState->player.h = 30;
-    g_gameState->player.vx = 0;
-    g_gameState->player.vy = 0;
-    g_gameState->player.active = true;
-    g_gameState->currentLevel = 1; // Initialize level
-
-    // 90s-style movement parameters
-    g_gameState->playerAccel = 0.6f;     // acceleration per frame
-    g_gameState->playerMaxSpeed = 6.0f;  // max velocity
-    g_gameState->playerFriction = 0.85f; // friction coefficient (momentum)
-
-    g_gameState->ammoCount = 30; // Level 1 start
-    g_gameState->killStreak = 0;
-    g_gameState->gameOver = false;
-
-    HWND hGame = CreateWindowW(
-        L"SpaceShooterWnd", L"whenthe's app installer - BUGSHOT!",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, GAME_WIDTH + 16, GAME_HEIGHT + 39, nullptr,
-        nullptr, hInstance, nullptr);
+    SelectObject(hdc, hOldPen);
+    SelectObject(hdc, hOldBrush);
+    DeleteObject(hBorderPen);
+
+    EndPaint(hWnd, &ps);
+    return 0;
+  }
+
+  case WM_DESTROY:
+    if (data)
+      delete data;
+    break;
+  }
+  return DefWindowProc(hWnd, message, wParam, lParam);
 }

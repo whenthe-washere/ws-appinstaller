@@ -43,7 +43,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
@@ -140,21 +140,14 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="..\..\..\..\..\..\..\HN_ICON1.ico" />
-    <Image Include="..\..\..\..\..\..\appinst-setup.bmp">
-      <DeploymentContent>false</DeploymentContent>
-    </Image>
     <Image Include="..\..\..\..\..\..\small.ico" />
     <Image Include="..\..\..\..\..\..\visualOS 100x100 1st.ico" />
     <Image Include="..\..\..\..\..\..\visualOS HoverNet Pre-Release.ico" />
     <Image Include="..\..\..\..\..\..\visualOS HoverNet PY Variant.ico" />
     <Image Include="..\..\..\..\..\..\visualOS HoverNet.ico" />
-    <Image Include="..\..\..\..\..\..\WAI Setup Splash.bmp" />
     <Image Include="..\..\..\..\..\..\whenthe%27s app installer.ico" />
     <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\visualOS 1.ico" />
-    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\WAI-small.ico" />
-    <Image Include="..\..\..\..\..\Media\Pictures &amp; PDFs\Pictures\PC\Icon Files\WAI.ico" />
     <Image Include="AIS.ico" />
-    <Image Include="bitmap2.bmp" />
     <Image Include="Bugfinders.ico" />
     <Image Include="CenterOSV4iso.ico" />
     <Image Include="HNDEV_ICON1.ico" />
